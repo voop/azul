@@ -1,7 +1,6 @@
 //! Extension module to add a Win32 menu a winit window
 
-use menu::{MenuItem, ApplicationMenu};
-use menu::command_ids;
+use platform_ext::menu::{MenuItem, ApplicationMenu};
 
 use glium::glutin::winit::winapi::{
     shared::windef::{HMENU, HWND},
@@ -57,7 +56,7 @@ impl ApplicationMenu {
     fn build(&self) -> HMENU {
 
         use std::ptr;
-        use menu::MenuItem::*;
+        use platform_ext::menu::MenuItem::*;
 
         // TODO: check for errors
         let current_menu = unsafe { CreateMenu() };
@@ -93,8 +92,8 @@ impl ApplicationMenu {
 
 fn win32_create_menu(hwnd: HWND) {
 
-    use menu::command_ids::*;
-    use menu::CommandId;
+    use platform_ext::menu::command_ids::*;
+    use platform_ext::menu::CommandId;
 
     // Init the menu bar
     macro_rules! menu_item {
@@ -107,15 +106,26 @@ fn win32_create_menu(hwnd: HWND) {
     let menu = ApplicationMenu {
         items: vec![
             MenuItem::SubMenu {
-                text: "&Test".into(),
+                text: "&Map".into(),
                 menu: Box::new(ApplicationMenu {
                     items: vec![
-                        menu_item!(CommandId(CMD_TEST), "&Hello\tCtrl+Shift+O"),
+                        menu_item!(CommandId(CMD_LOAD_MAP), "&Open map project\tCtrl+O"),
+                        menu_item!(CommandId(CMD_EXPORT_MAP), "&Export map to PDF\tCtrl+E"),
                         seperator!(),
-                        menu_item!(CommandId(4000), "Test 4000"),
+                        menu_item!(CommandId(CMD_LOAD_CORRECTIONS), "&Load cartographic corrections\tCtrl+L"),
+                        menu_item!(CommandId(CMD_SAVE_CORRECTIONS), "&Save cartographic corrections\tCtrl+S"),
                     ]
                 })
             },
+            MenuItem::SubMenu {
+                text: "&Street index".into(),
+                menu: Box::new(ApplicationMenu {
+                    items: vec![
+                        menu_item!(CommandId(CMD_TOGGLE_STREET_INDEX), "&Toggle street index\tCtrl+T"),
+                        menu_item!(CommandId(CMD_EXPORT_STREET_INDEX), "&Export street index\tCtrl+Shift+S"),
+                    ]
+                })
+            }
         ]
     };
 

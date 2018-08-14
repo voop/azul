@@ -7,10 +7,7 @@ use glium::glutin::{
     ModifiersState, dpi::{LogicalPosition, LogicalSize},
 };
 use std::collections::HashSet;
-use {
-    dom::On,
-    menu::{ApplicationMenu, ContextMenu},
-};
+use dom::On;
 
 const DEFAULT_TITLE: &str = "Azul App";
 const DEFAULT_WIDTH: f64 = 800.0;
@@ -105,10 +102,8 @@ pub struct WindowState
     pub title: String,
     /// The state of the keyboard for this frame
     pub(crate) keyboard_state: KeyboardState,
-    /// The "global" application menu of this window (one window usually only has one menu)
-    pub application_menu: Option<ApplicationMenu>,
-    /// The current context menu for this window
-    pub context_menu: Option<ContextMenu>,
+    /// Note: Only available on branch mapedit_menus: The commands sent by the Win32 menus
+    pub current_cmds: Vec<u16>,
     /// The x and y position, or None to let the WM decide where to put the window (default)
     pub position: Option<LogicalPosition>,
     /// The state of the mouse
@@ -160,8 +155,7 @@ impl Default for WindowState {
             title: DEFAULT_TITLE.into(),
             keyboard_state: KeyboardState::default(),
             mouse_state: MouseState::default(),
-            application_menu: None,
-            context_menu: None,
+            current_cmds: Vec::new(),
             position: None,
             size: WindowSize::default(),
             is_maximized: false,
@@ -264,6 +258,10 @@ impl WindowState
             },
             WindowEvent::KeyboardInput { input: KeyboardInput { state: ElementState::Released, virtual_keycode: Some(_), .. }, .. } => {
                 events_vec.insert(On::KeyUp);
+            },
+            #[cfg(target_os = "windows")]
+            Command(num) => {
+                self.current_cmds.push(*num);
             },
             _ => { }
         }

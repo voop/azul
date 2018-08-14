@@ -22,7 +22,7 @@
 
 //! This is attributed to Win32: Each menu item is a command, and you can, in the end
 //! switch on the command type when you want to see which menu item was clicked.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u16);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -46,8 +46,12 @@ pub enum MenuItem<T> {
 }
 
 pub mod command_ids {
-    // "Test" menu
-    pub const CMD_TEST: u16 = 9001;
+    pub const CMD_LOAD_MAP: u16 = 9001;
+    pub const CMD_EXPORT_MAP: u16 = 9002;
+    pub const CMD_SAVE_CORRECTIONS: u16 = 9003;
+    pub const CMD_LOAD_CORRECTIONS: u16 = 9004;
+    pub const CMD_TOGGLE_STREET_INDEX: u16 = 9005;
+    pub const CMD_EXPORT_STREET_INDEX: u16 = 9006;
 }
 
 // Empty test, for some reason codecov doesn't detect any files (and therefore

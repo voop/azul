@@ -35,6 +35,7 @@ use {
     compositor::Compositor,
     app::FrameEventInfo,
     resources::AppResources,
+    dom::Callback,
 };
 
 /// azul-internal ID for a window
@@ -459,6 +460,8 @@ pub struct Window<T: Layout> {
     ///
     /// This field is initialized from the `WindowCreateOptions`.
     pub(crate) state: WindowState,
+    /// Win32 menu callbacks
+    pub(crate) menu_callbacks: HashMap<u16, Callback<T>>,
     /// The webrender renderer
     pub(crate) renderer: Option<Renderer>,
     /// The display, i.e. the window
@@ -719,6 +722,7 @@ impl<T: Layout> Window<T> {
         let window = Window {
             events_loop: events_loop,
             state: options.state,
+            menu_callbacks: options.menu_callbacks,
             renderer: Some(renderer),
             display: Rc::new(display),
             css: css,

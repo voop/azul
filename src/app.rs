@@ -621,6 +621,21 @@ fn do_hit_test_and_call_callbacks<T: Layout>(
     app_state.windows[window_id.id].set_keyboard_state(&window.state.keyboard_state);
     app_state.windows[window_id.id].set_mouse_state(&window.state.mouse_state);
 
+    // Invoke Win32 menu cmds and remove the command after invoking the callback
+    for cmd in window.state.current_cmds.drain(..) {
+        if let Some(Callback(callback_func)) = window.menu_callbacks.get(&cmd) {
+            let window_event = WindowEvent {
+                window: window_id.id,
+                number_of_previous_siblings: None,
+                cursor_relative_to_item: (0.0, 0.0),
+                cursor_in_viewport: (0.0, 0.0),
+            };
+            if (callback_func)(app_state, window_event) == UpdateScreen::Redraw {
+                should_update_screen = UpdateScreen::Redraw;
+            }
+        }
+    }
+
     // NOTE: for some reason hit_test_results is empty...
     // ... but only when the mouse is relased - possible timing issue?
     for (item, callback_list) in hit_test_results.items.iter().filter_map(|item|

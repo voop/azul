@@ -82,6 +82,8 @@ pub mod traits;
 pub mod widgets;
 /// Window handling
 pub mod window;
+/// Platform extensions (non-portable window extensions for Win32, Wayland, X11, Cocoa)
+pub mod platform_ext;
 /// Global application (Initialization starts here)
 mod app;
 /// Wrapper for the application data & application state
@@ -111,13 +113,9 @@ mod images;
 mod font;
 /// Window state handling, event filtering
 mod window_state;
-/// Application / context menu handling. Currently Win32 only. Also has parsing functions
-mod menu;
 /// The compositor takes all textures (user-defined + the UI texture(s)) and draws them on
 /// top of each other
 mod compositor;
-/// Platform extensions (non-portable window extensions for Win32, Wayland, X11, Cocoa)
-mod platform_ext;
 /// Default logger, can be turned off with `feature = "logging"`
 #[cfg(feature = "logging")]
 mod logging;
