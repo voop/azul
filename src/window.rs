@@ -549,6 +549,12 @@ impl<T: Layout> Window<T> {
             .with_transparency(options.state.is_transparent)
             .with_multitouch();
 
+        #[cfg(target_os = "windows")] {
+            use platform_ext::win32;
+            use glium::glutin::os::windows::WindowBuilderExt;
+            window = window.with_create_callback(win32::win32_create_callback);
+        }
+
         // TODO: Update winit to have:
         //      .with_always_on_top(options.state.is_always_on_top)
         //

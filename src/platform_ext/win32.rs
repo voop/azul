@@ -3,7 +3,7 @@
 use menu::{MenuItem, ApplicationMenu};
 use menu::command_ids;
 
-use glium::glutin::winapi::{
+use glium::glutin::winit::winapi::{
     shared::windef::{HMENU, HWND},
     um::winuser::{ ShowWindow, IsIconic, keybd_event, SetMenu, CreateMenu, AppendMenuW,
         GetForegroundWindow, SetForegroundWindow, MF_STRING, MF_SEPARATOR, MF_POPUP,
@@ -90,10 +90,11 @@ impl ApplicationMenu {
         current_menu
     }
 }
-/*
+
 fn win32_create_menu(hwnd: HWND) {
 
-    use self::command_ids::*;
+    use menu::command_ids::*;
+    use menu::CommandId;
 
     // Init the menu bar
     macro_rules! menu_item {
@@ -109,7 +110,9 @@ fn win32_create_menu(hwnd: HWND) {
                 text: "&Test".into(),
                 menu: Box::new(ApplicationMenu {
                     items: vec![
-                        menu_item!(CMD_TEST, "&Hello\tCtrl+Shift+O"),
+                        menu_item!(CommandId(CMD_TEST), "&Hello\tCtrl+Shift+O"),
+                        seperator!(),
+                        menu_item!(CommandId(4000), "Test 4000"),
                     ]
                 })
             },
@@ -135,4 +138,3 @@ pub fn win32_create_callback(hwnd: HWND) {
     win32_bring_window_to_top(hwnd);
     win32_create_menu(hwnd);
 }
-*/

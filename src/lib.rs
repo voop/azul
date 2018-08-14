@@ -116,8 +116,8 @@ mod menu;
 /// The compositor takes all textures (user-defined + the UI texture(s)) and draws them on
 /// top of each other
 mod compositor;
-// /// Platform extensions (non-portable window extensions for Win32, Wayland, X11, Cocoa)
-// mod platform_ext;
+/// Platform extensions (non-portable window extensions for Win32, Wayland, X11, Cocoa)
+mod platform_ext;
 /// Default logger, can be turned off with `feature = "logging"`
 #[cfg(feature = "logging")]
 mod logging;
