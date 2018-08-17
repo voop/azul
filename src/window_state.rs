@@ -260,7 +260,7 @@ impl WindowState
                 events_vec.insert(On::KeyUp);
             },
             #[cfg(target_os = "windows")]
-            Command(num) => {
+            WindowEvent::Command(num) => {
                 self.current_cmds.push(*num);
             },
             _ => { }
