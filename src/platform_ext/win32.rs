@@ -145,6 +145,7 @@ fn win32_create_menu(hwnd: HWND) {
 // will lock up the application.
 pub fn win32_create_callback(hwnd: HWND) {
     // for release builds, respect the user focus
+    #[cfg(debug_assertions)]
     win32_bring_window_to_top(hwnd);
     win32_create_menu(hwnd);
 }
