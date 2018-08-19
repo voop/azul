@@ -35,7 +35,6 @@ use {
     compositor::Compositor,
     app::FrameEventInfo,
     resources::AppResources,
-    dom::Callback,
 };
 
 /// azul-internal ID for a window
