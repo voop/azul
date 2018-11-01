@@ -127,3 +127,7 @@ required-features = []
 [[example]]
 name = "dragger"
 required-features = []
+
+[[example]]
+name = "webrender_bug"
+required-features = []
