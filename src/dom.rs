@@ -3,6 +3,7 @@ use std::{
     rc::Rc,
     cell::RefCell,
     hash::{Hash, Hasher},
+    marker::PhantomData,
     sync::atomic::{AtomicUsize, Ordering},
     collections::{BTreeMap, BTreeSet},
     iter::FromIterator,
@@ -80,115 +81,78 @@ impl<T, E> From<Result<T, E>> for UpdateScreen {
     }
 }
 
+/// This is a workaround around current compiler limitations.
+/// See https://github.com/rust-lang/rust/issues/54508 for the tracking issue.
+///
+/// Essentially what happens is that PartialEq, Hash and Debug aren't implemented
+/// for all function pointers, it depends on the function pointer signature whether
+/// the callback is comparable. `impl<T> Hash for fn(&mut AppState<T>)` won't work
+/// because someone else could possibly create a new impl in another crate for
+/// the same function pointer type.
+///
+/// Without this, there is no #[derive()], which leads to a massive code duplication.
+/// So the workaround is via *const (). The type itself has to be public,
+/// since it's exposed in the public API, however, it can only be "constructed"
+/// from a `Callback` from outside the crate.
+
+macro_rules! callback_internal {
+    ($original_struct_name:ident, $new_struct_name:ident, $fptr_type:ident) => (
+
+        #[derive(Debug, Clone, PartialEq, Hash, Eq)]
+        pub struct $new_struct_name<T: Layout> {
+            ptr: *const (),
+            _phantom: PhantomData<T>,
+        }
+
+        impl<T: Layout> $new_struct_name<T> {
+            fn initialize(fnptr: $fptr_type<T>) -> Self {
+                $new_struct_name {
+                    ptr: fnptr as *const (),
+                    _phantom: PhantomData,
+                }
+            }
+
+            pub(crate) fn get_fnptr(&self) -> $fptr_type<T> {
+                unsafe { ::std::mem::transmute(self.ptr) }
+            }
+        }
+
+        /// This way, a user can transparently convert from a Callback() to a
+        /// CallbackInternal, even though the API of CallbackInternal is private to this module.
+        impl<T: Layout> From<$original_struct_name<T>> for $new_struct_name<T>  {
+            fn from(input: $original_struct_name<T>) -> Self {
+                $new_struct_name::initialize(input.0)
+            }
+        }
+    )
+}
+
+#[doc(inline)]
+pub type CallbackType<T: Layout> = fn(&mut AppState<T>, WindowEvent<T>) -> UpdateScreen;
+#[doc(inline)]
+pub type GlCallbackType<T: Layout> = fn(&StackCheckedPointer<T>, WindowInfo<T>, HidpiAdjustedBounds) -> Option<Texture>;
+#[doc(inline)]
+pub type IFrameCallbackType<T: Layout> = fn(&StackCheckedPointer<T>, WindowInfo<T>, HidpiAdjustedBounds) -> Dom<T>;
+
 /// Stores a function pointer that is executed when the given UI element is hit
 ///
 /// Must return an `UpdateScreen` that denotes if the screen should be redrawn.
 /// The CSS is not affected by this, so if you push to the windows' CSS inside the
 /// function, the screen will not be automatically redrawn, unless you return an
 /// `UpdateScreen::Redraw` from the function
-pub struct Callback<T: Layout>(pub fn(&mut AppState<T>, WindowEvent<T>) -> UpdateScreen);
+#[derive(Copy, Clone)]
+pub struct Callback<T: Layout>(pub CallbackType<T>);
+#[derive(Copy, Clone)]
+pub struct GlTextureCallback<T: Layout>(pub GlCallbackType<T>);
+#[derive(Copy, Clone)]
+pub struct IFrameCallback<T: Layout>(pub IFrameCallbackType<T>);
 
-// #[derive(Debug, Clone, PartialEq, Hash, Eq)] for Callback<T>
-
-impl<T: Layout> fmt::Debug for Callback<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Callback @ 0x{:x}", self.0 as usize)
-    }
-}
-
-impl<T: Layout> Clone for Callback<T> {
-    fn clone(&self) -> Self {
-        Callback(self.0.clone())
-    }
-}
-
-/// As a hashing function, we use the function pointer casted to a usize
-/// as a unique ID for the function. This way, we can hash and compare DOM nodes
-/// (to create diffs between two states). Comparing usizes is more efficient
-/// than re-creating the whole DOM and serves as a caching mechanism.
-impl<T: Layout> Hash for Callback<T> {
-  fn hash<H>(&self, state: &mut H) where H: Hasher {
-    state.write_usize(self.0 as usize);
-  }
-}
-
-/// Basically compares the function pointers and types for equality
-impl<T: Layout> PartialEq for Callback<T> {
-  fn eq(&self, rhs: &Self) -> bool {
-    self.0 as usize == rhs.0 as usize
-  }
-}
-
-impl<T: Layout> Eq for Callback<T> { }
-
-impl<T: Layout> Copy for Callback<T> { }
-
-
-pub struct GlTextureCallback<T: Layout>(pub fn(&StackCheckedPointer<T>, WindowInfo<T>, HidpiAdjustedBounds) -> Option<Texture>);
-
-// #[derive(Debug, Clone, PartialEq, Hash, Eq)] for GlTextureCallback<T>
-
-impl<T: Layout> fmt::Debug for GlTextureCallback<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "GlTextureCallback @ 0x{:x}", self.0 as usize)
-    }
-}
-
-impl<T: Layout> Clone for GlTextureCallback<T> {
-    fn clone(&self) -> Self {
-        GlTextureCallback(self.0.clone())
-    }
-}
-
-impl<T: Layout> Hash for GlTextureCallback<T> {
-  fn hash<H>(&self, state: &mut H) where H: Hasher {
-    state.write_usize(self.0 as usize);
-  }
-}
-
-impl<T: Layout> PartialEq for GlTextureCallback<T> {
-  fn eq(&self, rhs: &Self) -> bool {
-    self.0 as usize == rhs.0 as usize
-  }
-}
-
-impl<T: Layout> Eq for GlTextureCallback<T> { }
-impl<T: Layout> Copy for GlTextureCallback<T> { }
-
-pub struct IFrameCallback<T: Layout>(pub fn(&StackCheckedPointer<T>, WindowInfo<T>, HidpiAdjustedBounds) -> Dom<T>);
-
-// #[derive(Debug, Clone, PartialEq, Hash, Eq)] for IFrameCallback<T>
-
-impl<T: Layout> fmt::Debug for IFrameCallback<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "IFrameCallback @ 0x{:x}", self.0 as usize)
-    }
-}
-
-impl<T: Layout> Clone for IFrameCallback<T> {
-    fn clone(&self) -> Self {
-        IFrameCallback(self.0.clone())
-    }
-}
-
-impl<T: Layout> Hash for IFrameCallback<T> {
-  fn hash<H>(&self, state: &mut H) where H: Hasher {
-    state.write_usize(self.0 as usize);
-  }
-}
-
-impl<T: Layout> PartialEq for IFrameCallback<T> {
-  fn eq(&self, rhs: &Self) -> bool {
-    self.0 as usize == rhs.0 as usize
-  }
-}
-
-impl<T: Layout> Eq for IFrameCallback<T> { }
-
-impl<T: Layout> Copy for IFrameCallback<T> { }
-
+callback_internal!(Callback, CallbackInternal, CallbackType);
+callback_internal!(GlTextureCallback, GlTextureCallbackInternal, GlCallbackType);
+callback_internal!(IFrameCallback, IFrameCallbackInternal, IFrameCallbackType);
 
 /// List of core DOM node types built-into by `azul`.
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum NodeType<T: Layout> {
     /// Regular div with no particular type of data attached
     Div,
@@ -202,83 +166,14 @@ pub enum NodeType<T: Layout> {
     /// OpenGL texture. The `Svg` widget deserizalizes itself into a texture
     /// Equality and Hash values are only checked by the OpenGl texture ID,
     /// Azul does not check that the contents of two textures are the same
-    GlTexture((GlTextureCallback<T>, StackCheckedPointer<T>)),
+    GlTexture((GlTextureCallbackInternal<T>, StackCheckedPointer<T>)),
     /// DOM that gets passed its width / height during the layout
-    IFrame((IFrameCallback<T>, StackCheckedPointer<T>)),
+    IFrame((IFrameCallbackInternal<T>, StackCheckedPointer<T>)),
 }
 
-// #[derive(Debug, Clone, PartialEq, Hash, Eq)] for NodeType<T>
-
-impl<T: Layout> fmt::Debug for NodeType<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::NodeType::*;
-        match self {
-            Div => write!(f, "NodeType::Div"),
-            Label(a) => write!(f, "NodeType::Label {{ {:?} }}", a),
-            Text(a) => write!(f, "NodeType::Text {{ {:?} }}", a),
-            Image(a) => write!(f, "NodeType::Image {{ {:?} }}", a),
-            GlTexture((ptr, cb)) => write!(f, "NodeType::GlTexture {{ ptr: {:?}, callback: {:?} }}", ptr, cb),
-            IFrame((ptr, cb)) => write!(f, "NodeType::IFrame {{ ptr: {:?}, callback: {:?} }}", ptr, cb),
-        }
-    }
+impl<T: Layout> Default for NodeType<T> {
+    fn default() -> Self { NodeType::Div }
 }
-
-impl<T: Layout> Clone for NodeType<T> {
-    fn clone(&self) -> Self {
-        use self::NodeType::*;
-        match self {
-            Div => Div,
-            Label(a) => Label(a.clone()),
-            Text(a) => Text(a.clone()),
-            Image(a) => Image(a.clone()),
-            GlTexture((ptr, a)) => GlTexture((ptr.clone(), a.clone())),
-            IFrame((ptr, a)) => IFrame((ptr.clone(), a.clone())),
-        }
-    }
-}
-
-impl<T: Layout> Hash for NodeType<T> {
-    fn hash<H>(&self, state: &mut H) where H: Hasher {
-        use self::NodeType::*;
-        use std::mem;
-        mem::discriminant(&self).hash(state);
-        match self {
-            Div => { },
-            Label(a) => a.hash(state),
-            Text(a) => a.hash(state),
-            Image(a) => a.hash(state),
-            GlTexture((ptr, a)) => {
-                ptr.hash(state);
-                a.hash(state);
-            },
-            IFrame((ptr, a)) => {
-                ptr.hash(state);
-                a.hash(state);
-            },
-        }
-    }
-}
-
-impl<T: Layout> PartialEq for NodeType<T> {
-    fn eq(&self, rhs: &Self) -> bool {
-        use self::NodeType::*;
-        match (self, rhs) {
-            (Div, Div) => true,
-            (Label(a), Label(b)) => a == b,
-            (Text(a), Text(b)) => a == b,
-            (Image(a), Image(b)) => a == b,
-            (GlTexture((ptr_a, a)), GlTexture((ptr_b, b))) => {
-                a == b && ptr_a == ptr_b
-            },
-            (IFrame((ptr_a, a)), IFrame((ptr_b, b))) => {
-                a == b && ptr_a == ptr_b
-            },
-            _ => false,
-        }
-    }
-}
-
-impl<T: Layout> Eq for NodeType<T> { }
 
 /// Like the node type, but only signifies the type (i.e. the discriminant value)
 /// of the `NodeType`, without the actual data
@@ -430,6 +325,7 @@ pub enum On {
     VirtualKeyUp,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct NodeData<T: Layout> {
     /// `div`
     pub node_type: NodeType<T>,
@@ -466,68 +362,6 @@ pub struct NodeData<T: Layout> {
     pub dynamic_css_overrides: Vec<(String, ParsedCssProperty)>
 }
 
-impl<T: Layout> PartialEq for NodeData<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.node_type == other.node_type &&
-        self.ids == other.ids &&
-        self.classes == other.classes &&
-        self.events == other.events &&
-        self.default_callback_ids == other.default_callback_ids &&
-        self.force_enable_hit_test == other.force_enable_hit_test &&
-        self.dynamic_css_overrides == other.dynamic_css_overrides
-    }
-}
-
-impl<T: Layout> Eq for NodeData<T> { }
-
-impl<T: Layout> Default for NodeData<T> {
-    fn default() -> Self {
-        NodeData {
-            node_type: NodeType::Div,
-            ids: Vec::new(),
-            classes: Vec::new(),
-            events: CallbackList::default(),
-            default_callback_ids: Vec::new(),
-            force_enable_hit_test: Vec::new(),
-            dynamic_css_overrides: Vec::new(),
-        }
-    }
-}
-
-impl<T: Layout> Hash for NodeData<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.node_type.hash(state);
-        for id in &self.ids {
-            id.hash(state);
-        }
-        for class in &self.classes {
-            class.hash(state);
-        }
-        for default_callback_id in &self.default_callback_ids {
-            default_callback_id.hash(state);
-        }
-        self.events.hash(state);
-        self.force_enable_hit_test.hash(state);
-        for override_property in &self.dynamic_css_overrides {
-            override_property.hash(state);
-        }
-    }
-}
-
-impl<T: Layout> Clone for NodeData<T> {
-    fn clone(&self) -> Self {
-        Self {
-            node_type: self.node_type.clone(),
-            ids: self.ids.clone(),
-            classes: self.classes.clone(),
-            events: self.events.clone(),
-            default_callback_ids: self.default_callback_ids.clone(),
-            force_enable_hit_test: self.force_enable_hit_test.clone(),
-            dynamic_css_overrides: self.dynamic_css_overrides.clone(),
-        }
-    }
-}
-
 impl<T: Layout> fmt::Display for NodeData<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 
@@ -546,28 +380,6 @@ impl<T: Layout> fmt::Display for NodeData<T> {
         };
 
         write!(f, "[{} {} {}]", html_type, id_string, class_string)
-    }
-}
-
-impl<T: Layout> fmt::Debug for NodeData<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-            "NodeData {{ \
-                \tnode_type: {:?}, \
-                \tids: {:?}, \
-                \tclasses: {:?}, \
-                \tevents: {:?}, \
-                \tdefault_callback_ids: {:?}, \
-                \tforce_enable_hit_test: {:?}, \
-                \tdynamic_css_overrides: {:?}, \
-            }}",
-        self.node_type,
-        self.ids,
-        self.classes,
-        self.events,
-        self.default_callback_ids,
-        self.force_enable_hit_test,
-        self.dynamic_css_overrides)
     }
 }
 
@@ -596,67 +408,17 @@ impl<T: Layout> NodeData<T> {
     }
 }
 
+#[derive(Debug, Default, Hash, Clone, PartialEq, Eq)]
 pub struct CallbackList<T: Layout> {
-    pub callbacks: BTreeMap<On, Callback<T>>
+    pub callbacks: BTreeMap<On, CallbackInternal<T>>
 }
-
-impl<T: Layout> Default for CallbackList<T> {
-    fn default() -> Self {
-        Self {
-            callbacks: BTreeMap::default(),
-        }
-    }
-}
-
-impl<T: Layout> Hash for CallbackList<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        for callback in &self.callbacks {
-            callback.hash(state);
-        }
-    }
-}
-
-impl<T: Layout> fmt::Debug for CallbackList<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "CallbackList (length: {:?})", self.callbacks.len())
-    }
-}
-
-impl<T: Layout> Clone for CallbackList<T> {
-    fn clone(&self) -> Self {
-        CallbackList { callbacks: self.callbacks.clone() }
-    }
-}
-
-impl<T: Layout> PartialEq for CallbackList<T> {
-  fn eq(&self, rhs: &Self) -> bool {
-    if self.callbacks.len() != rhs.callbacks.len() {
-        return false;
-    }
-    self.callbacks.iter().all(|(key, val)| {
-        rhs.callbacks.get(key) == Some(val)
-    })
-  }
-}
-
-impl<T: Layout> Eq for CallbackList<T> { }
 
 /// The document model, similar to HTML. This is a create-only structure, you don't actually read anything back
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Dom<T: Layout> {
     pub(crate) arena: Rc<RefCell<Arena<NodeData<T>>>>,
     pub(crate) root: NodeId,
     pub(crate) head: NodeId,
-}
-
-impl<T: Layout> fmt::Debug for Dom<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-        "Dom {{ arena: {:?}, root: {:?}, head: {:?} }}",
-        self.arena,
-        self.root,
-        self.head)
-    }
 }
 
 impl<T: Layout> FromIterator<Dom<T>> for Dom<T> {
@@ -876,7 +638,7 @@ impl<T: Layout> Dom<T> {
 
     /// Same as `event`, but easier to use for method chaining in a builder-style pattern
     #[inline]
-    pub fn with_callback(mut self, on: On, callback: Callback<T>) -> Self {
+    pub fn with_callback<I: Into<CallbackInternal<T>>>(mut self, on: On, callback: I) -> Self {
         self.add_callback(on, callback);
         self
     }
@@ -912,8 +674,8 @@ impl<T: Layout> Dom<T> {
     }
 
     #[inline]
-    pub fn add_callback(&mut self, on: On, callback: Callback<T>) {
-        self.arena.borrow_mut()[self.head].data.events.callbacks.insert(on, callback);
+    pub fn add_callback<I: Into<CallbackInternal<T>>>(&mut self, on: On, callback: I) {
+        self.arena.borrow_mut()[self.head].data.events.callbacks.insert(on, callback.into());
     }
 
     #[inline]
