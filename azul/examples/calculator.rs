@@ -65,6 +65,7 @@ enum Number {
 }
 
 impl OperandStack {
+
     /// Returns the displayable string, i.e for:
     /// `[3, 4, Dot, 5]` => `"34.5"`
     pub fn get_display(&self) -> String {

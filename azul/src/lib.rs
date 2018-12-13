@@ -172,6 +172,8 @@ mod compositor;
 mod logging;
 /// Flexbox-based UI solver
 mod ui_solver;
+/// Creates and maintains UI diffs (for focus tracking)
+mod diff;
 
 // Faster implementation of a HashMap (optional, disabled by default, turn on with --feature="faster-hashing")
 
