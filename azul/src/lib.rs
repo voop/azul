@@ -109,7 +109,9 @@ extern crate twox_hash;
 #[cfg(not(target_os = "linux"))]
 extern crate nfd;
 
-extern crate azul_css;
+extern crate azul_dom;
+extern crate azul_traits;
+extern crate azul_native_style;
 extern crate azul_native_style;
 extern crate azul_css_parser;
 
@@ -130,8 +132,6 @@ pub mod daemon;
 pub mod default_callbacks;
 /// Bindings to the native file-chooser, color picker, etc. dialogs
 pub mod dialogs;
-/// DOM / HTML node handling
-pub mod dom;
 /// Re-exports of errors
 pub mod error;
 /// Font handling
@@ -142,10 +142,6 @@ pub mod task;
 pub mod text_cache;
 /// Text layout helper functions - useful for text layout outside of standard containers
 pub mod text_layout;
-/// The layout traits for creating a layout-able application
-pub mod traits;
-/// Built-in widgets
-pub mod widgets;
 /// Window handling
 pub mod window;
 /// Window state handling, event filtering
@@ -158,8 +154,6 @@ mod ui_description;
 /// Converts the UI description (the styled HTML nodes)
 /// to an actual display list (+ layout)
 mod display_list;
-/// Slab allocator for nodes, based on IDs (replaces kuchiki + markup5ever)
-mod id_tree;
 /// State handling for user interfaces
 mod ui_state;
 /// Image handling
@@ -220,3 +214,29 @@ pub mod prelude {
     pub use log::LevelFilter;
 }
 
+#[cfg(feature = "default-widgets")]
+extern crate azul_widgets;
+/// Default, built-in widgets (see azul-widgets) crate
+#[cfg(feature = "default-widgets")]
+pub mod widgets {
+    pub use ::azul_widgets::*;
+}
+
+/// The layout traits for creating a layout-able application
+pub mod widgets {
+    pub use ::azul_traits::*;
+}
+
+/// DOM / HTML node handling
+pub mod dom {
+    pub use azul_dom::dom::*;
+}
+
+/// Slab allocator for nodes, based on IDs (replaces kuchiki + markup5ever)
+mod id_tree {
+    pub use azul_dom::id_tree::*;
+}
+
+pub mod traits {
+    pub use azul_dom::traits::*;
+}

@@ -9,13 +9,13 @@ use std::{
 };
 use glium::{Texture2d, framebuffer::SimpleFrameBuffer};
 use azul_css::{ NodeTypePath, CssProperty };
+use traits::Layout;
 use {
     ui_state::UiState,
     FastHashMap,
     window::{WindowEvent, WindowInfo},
     images::{ImageId, ImageState},
     text_cache::TextId,
-    traits::Layout,
     app_state::AppState,
     id_tree::{NodeId, Node, Arena, NodeHierarchy, NodeDataContainer},
     default_callbacks::{DefaultCallbackId, StackCheckedPointer},

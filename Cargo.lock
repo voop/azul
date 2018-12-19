@@ -58,7 +58,9 @@ dependencies = [
  "app_units 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "azul-css 0.1.0",
  "azul-css-parser 0.1.0",
+ "azul-dom 0.1.0",
  "azul-native-style 0.1.0",
+ "azul-widgets 0.1.0",
  "azul_glium 0.22.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "backtrace 0.3.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "clipboard2 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -94,11 +96,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "azul-dom"
+version = "0.1.0"
+dependencies = [
+ "azul-css 0.1.0",
+]
+
+[[package]]
 name = "azul-native-style"
 version = "0.1.0"
 dependencies = [
  "azul-css 0.1.0",
  "azul-css-parser 0.1.0",
+]
+
+[[package]]
+name = "azul-widgets"
+version = "0.1.0"
+dependencies = [
+ "azul-css 0.1.0",
+ "azul-dom 0.1.0",
 ]
 
 [[package]]

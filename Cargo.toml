@@ -4,4 +4,6 @@ members = [
     "azul-css",
     "azul-css-parser",
     "azul-native-style",
+    "azul-widgets",
+    "azul-dom",
 ]
