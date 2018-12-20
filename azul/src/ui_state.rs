@@ -1,10 +1,9 @@
 use std::{
     fmt,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
 };
 use azul_css::CssProperty;
 use {
-    FastHashMap,
     window::{WindowInfo, WindowId},
     traits::Layout,
     dom::{Callback, Dom, On, TabIndex},
@@ -23,7 +22,7 @@ pub struct UiState<T: Layout> {
     pub tab_index_tags: BTreeMap<TagId, (NodeId, TabIndex)>,
     pub draggable_tags: BTreeMap<TagId, NodeId>,
     /// The style properties that should be overridden for this frame, cloned from the `Css`
-    pub dynamic_style_overrides: BTreeMap<NodeId, FastHashMap<String, CssProperty>>,
+    pub dynamic_css_overrides: BTreeMap<NodeId, HashMap<String, CssProperty>>,
 }
 
 impl<T: Layout> fmt::Debug for UiState<T> {
@@ -80,12 +79,4 @@ impl<T: Layout> UiState<T> {
     pub(crate) fn from_dom(dom: Dom<T>) -> Self {
         dom.into_ui_state()
     }
-}
-
-// Empty test, for some reason codecov doesn't detect any files (and therefore
-// doesn't report codecov % correctly) except if they have at least one test in
-// the file. This is an empty test, which should be updated later on
-#[test]
-fn __codecov_test_ui_state_file() {
-
 }

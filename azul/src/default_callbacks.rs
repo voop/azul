@@ -1,10 +1,19 @@
-//! WARNING: Unsafe code ahead - calls the default methods
-
-use app_state::AppStateNoData;
-use window::WindowEvent;
+use std::{
+    collections::BTreeMap,
+    fmt,
+    hash::{Hash, Hasher},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+use {
+    dom::{UpdateScreen},
+    app_state::AppStateNoData,
+    window::WindowEvent,
+    traits::Layout,
+};
 
 pub type DefaultCallbackType<T, U> = fn(&mut U, app_state_no_data: AppStateNoData<T>, window_event: WindowEvent<T>) -> UpdateScreen;
 pub type DefaultCallbackTypeUnchecked<T> = fn(&StackCheckedPointer<T>, app_state_no_data: AppStateNoData<T>, window_event: WindowEvent<T>) -> UpdateScreen;
+pub use self::stack_checked_pointer::StackCheckedPointer;
 
 mod stack_checked_pointer {
 
@@ -176,28 +185,6 @@ mod stack_checked_pointer {
         assert_eq!(is_subtype_of(&data, &data.p), true);
         assert_eq!(is_subtype_of(&data, &data.p[0]), false);
     }
-}
-
-
-pub use self::stack_checked_pointer::StackCheckedPointer;
-use std::{
-    collections::BTreeMap,
-    fmt,
-    hash::{Hash, Hasher},
-    sync::atomic::{AtomicUsize, Ordering},
-};
-use {
-    dom::{UpdateScreen},
-    traits::Layout,
-};
-
-static LAST_DEFAULT_CALLBACK_ID: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct DefaultCallbackId(usize);
-
-pub(crate) fn get_new_unique_default_callback_id() -> DefaultCallbackId {
-    DefaultCallbackId(LAST_DEFAULT_CALLBACK_ID.fetch_add(1, Ordering::SeqCst))
 }
 
 pub struct DefaultCallback<T: Layout>(pub DefaultCallbackTypeUnchecked<T>);

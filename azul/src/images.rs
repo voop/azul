@@ -14,20 +14,6 @@ use image::{
     ImageError, DynamicImage, GenericImageView,
 };
 
-static IMAGE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ImageId {
-    id: usize,
-}
-
-pub(crate) fn new_image_id() -> ImageId {
-    let unique_id =IMAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    ImageId {
-        id: unique_id,
-    }
-}
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ImageType {
     Bmp,

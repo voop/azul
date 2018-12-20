@@ -12,3 +12,5 @@ repository = "https://github.com/maps4print/azul"
 
 [dependencies]
 azul-css                = { version = "0.1.0", path = "../azul-css" }
+# TODO: Necessary for GlCallback - replace later with normal trait aroung GL texture ID!
+azul_glium              = { version = "0.22.0",               default-features = false, features = ["glutin"] }

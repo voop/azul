@@ -4,24 +4,24 @@ use std::{
     cell::RefCell,
     hash::{Hash, Hasher},
     sync::atomic::{AtomicUsize, Ordering},
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     iter::FromIterator,
 };
 use glium::{Texture2d, framebuffer::SimpleFrameBuffer};
 use azul_css::{ NodeTypePath, CssProperty };
 use traits::Layout;
-use {
-    ui_state::UiState,
-    FastHashMap,
+use id_tree::{NodeId, Node, Arena, NodeHierarchy, NodeDataContainer};
+// StackCheckedPointer, WindowEvent, WindowInfo, AppState, HidpiAdjustedBounds missing
+/*
+{
     window::{WindowEvent, WindowInfo},
-    images::{ImageId, ImageState},
     text_cache::TextId,
     app_state::AppState,
-    id_tree::{NodeId, Node, Arena, NodeHierarchy, NodeDataContainer},
     default_callbacks::{DefaultCallbackId, StackCheckedPointer},
     window::HidpiAdjustedBounds,
     text_layout::{Words, FontMetrics, TextSizePx},
 };
+*/
 
 static TAG_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -37,6 +37,44 @@ fn new_tag_id() -> TagId {
 
 pub(crate) fn new_scroll_tag_id() -> ScrollTagId {
     ScrollTagId(new_tag_id())
+}
+
+static LAST_DEFAULT_CALLBACK_ID: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct DefaultCallbackId(usize);
+
+pub(crate) fn get_new_unique_default_callback_id() -> DefaultCallbackId {
+    DefaultCallbackId(LAST_DEFAULT_CALLBACK_ID.fetch_add(1, Ordering::SeqCst))
+}
+
+static IMAGE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageId {
+    id: usize,
+}
+
+pub(crate) fn new_image_id() -> ImageId {
+    let unique_id =IMAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ImageId {
+        id: unique_id,
+    }
+}
+
+static TEXT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn new_text_id() -> TextId {
+    let unique_id = TEXT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    TextId {
+        inner: unique_id
+    }
+}
+
+/// A unique ID by which a large block of text can be uniquely identified
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct TextId {
+    inner: usize,
 }
 
 /// Calculated hash of a DOM node, used for querying attributes of the DOM node
@@ -293,46 +331,6 @@ impl<T: Layout> NodeType<T> {
             IFrame(_) => NodeTypePath::IFrame,
         }
     }
-
-    /// Returns the preferred width, for example for an image, that would be the
-    /// original width (an image always wants to take up the original space)
-    pub(crate) fn get_preferred_width(&self, image_cache: &FastHashMap<ImageId, ImageState>) -> Option<f32> {
-        use self::NodeType::*;
-        match self {
-            Image(i) => image_cache.get(i).and_then(|image_state| Some(image_state.get_dimensions().0)),
-            Label(_) | Text(_) => /* TODO: Calculate the minimum width for the text? */ None,
-            _ => None,
-        }
-    }
-
-    /// Given a certain width, returns the
-    pub(crate) fn get_preferred_height_based_on_width(
-        &self,
-        div_width: TextSizePx,
-        image_cache: &FastHashMap<ImageId, ImageState>,
-        words: Option<&Words>,
-        font_metrics: Option<FontMetrics>,
-    ) -> Option<TextSizePx>
-    {
-        use self::NodeType::*;
-        use azul_css::{LayoutOverflow, TextOverflowBehaviour, TextOverflowBehaviourInner};
-
-        match self {
-            Image(i) => image_cache.get(i).and_then(|image_state| {
-                let (image_original_height, image_original_width) = image_state.get_dimensions();
-                Some(div_width * (image_original_width / image_original_height))
-            }),
-            Label(_) | Text(_) => {
-                let (words, font) = (words?, font_metrics?);
-                let vertical_info = words.get_vertical_height(&LayoutOverflow {
-                    horizontal: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Scroll),
-                    .. Default::default()
-                }, &font, div_width);
-                Some(vertical_info.vertical_height)
-            }
-            _ => None,
-        }
-    }
 }
 
 /// When to call a callback action - `On::MouseOver`, `On::MouseOut`, etc.
@@ -420,10 +418,10 @@ pub struct NodeData<T: Layout> {
     /// ```rust,ignore
     /// let node = NodeData {
     ///     id: Some("my_item".into()),
-    ///     dynamic_style_overrides: vec![("my_custom_width".into(), CssProperty::Width(LayoutWidth::px(500.0)))]
+    ///     dynamic_css_overrides: vec![("my_custom_width".into(), CssProperty::Width(LayoutWidth::px(500.0)))]
     /// }
     /// ```
-    pub dynamic_style_overrides: Vec<(String, CssProperty)>,
+    pub dynamic_css_overrides: Vec<(String, CssProperty)>,
     /// Whether this div can be dragged or not, similar to `draggable = "true"` in HTML, .
     ///
     /// **TODO**: Currently doesn't do anything, since the drag & drop implementation is missing, API stub.
@@ -476,7 +474,7 @@ impl<T: Layout> PartialEq for NodeData<T> {
         self.classes == other.classes &&
         self.callbacks == other.callbacks &&
         self.default_callback_ids == other.default_callback_ids &&
-        self.dynamic_style_overrides == other.dynamic_style_overrides &&
+        self.dynamic_css_overrides == other.dynamic_css_overrides &&
         self.draggable == other.draggable &&
         self.tab_index == other.tab_index
     }
@@ -492,7 +490,7 @@ impl<T: Layout> Default for NodeData<T> {
             classes: Vec::new(),
             callbacks: Vec::new(),
             default_callback_ids: Vec::new(),
-            dynamic_style_overrides: Vec::new(),
+            dynamic_css_overrides: Vec::new(),
             draggable: false,
             tab_index: None,
         }
@@ -514,8 +512,8 @@ impl<T: Layout> Hash for NodeData<T> {
         for default_callback_id in &self.default_callback_ids {
             default_callback_id.hash(state);
         }
-        for dynamic_style_override in &self.dynamic_style_overrides {
-            dynamic_style_override.hash(state);
+        for dynamic_css_override in &self.dynamic_css_overrides {
+            dynamic_css_override.hash(state);
         }
         self.draggable.hash(state);
         self.tab_index.hash(state);
@@ -530,7 +528,7 @@ impl<T: Layout> Clone for NodeData<T> {
             classes: self.classes.clone(),
             callbacks: self.callbacks.clone(),
             default_callback_ids: self.default_callback_ids.clone(),
-            dynamic_style_overrides: self.dynamic_style_overrides.clone(),
+            dynamic_css_overrides: self.dynamic_css_overrides.clone(),
             draggable: self.draggable.clone(),
             tab_index: self.tab_index.clone(),
         }
@@ -567,7 +565,7 @@ impl<T: Layout> fmt::Debug for NodeData<T> {
                 \tclasses: {:?}, \
                 \tcallbacks: {:?}, \
                 \tdefault_callback_ids: {:?}, \
-                \tdynamic_style_overrides: {:?}, \
+                \tdynamic_css_overrides: {:?}, \
                 \tdraggable: {:?}, \
                 \ttab_index: {:?}, \
             }}",
@@ -576,7 +574,7 @@ impl<T: Layout> fmt::Debug for NodeData<T> {
         self.classes,
         self.callbacks,
         self.default_callback_ids,
-        self.dynamic_style_overrides,
+        self.dynamic_css_overrides,
         self.draggable,
         self.tab_index)
     }
@@ -862,8 +860,8 @@ impl<T: Layout> Dom<T> {
     }
 
     #[inline]
-    pub fn with_style_override<S: Into<String>>(mut self, id: S, property: CssProperty) -> Self {
-        self.add_style_override(id, property);
+    pub fn with_css_override<S: Into<String>>(mut self, id: S, property: CssProperty) -> Self {
+        self.add_css_override(id, property);
         self
     }
 
@@ -888,8 +886,8 @@ impl<T: Layout> Dom<T> {
     }
 
     #[inline]
-    pub fn add_style_override<S: Into<String>>(&mut self, override_id: S, property: CssProperty) {
-        self.arena.borrow_mut().node_data[self.head].dynamic_style_overrides.push((override_id.into(), property));
+    pub fn add_css_override<S: Into<String>>(&mut self, override_id: S, property: CssProperty) {
+        self.arena.borrow_mut().node_data[self.head].dynamic_css_overrides.push((override_id.into(), property));
     }
 
     /// Prints a debug formatted version of the DOM for easier debugging
@@ -926,7 +924,7 @@ impl<T: Layout> Dom<T> {
         // Mapping from nodes to tags, reverse mapping (not used right now, may be useful in the future)
         let mut node_ids_to_tag_ids = BTreeMap::new();
         // Which nodes have extra dynamic CSS overrides?
-        let mut dynamic_style_overrides = BTreeMap::new();
+        let mut dynamic_css_overrides = BTreeMap::new();
 
         // Reset the tag
         TAG_ID.swap(1, Ordering::SeqCst);
@@ -972,8 +970,8 @@ impl<T: Layout> Dom<T> {
                 }
 
                 // Collect all the styling overrides into one hash map
-                if !data.dynamic_style_overrides.is_empty() {
-                    dynamic_style_overrides.insert(node_id, data.dynamic_style_overrides.iter().cloned().collect());
+                if !data.dynamic_css_overrides.is_empty() {
+                    dynamic_css_overrides.insert(node_id, data.dynamic_css_overrides.iter().cloned().collect());
                 }
             }
         }
@@ -986,9 +984,21 @@ impl<T: Layout> Dom<T> {
             draggable_tags,
             node_ids_to_tag_ids,
             tag_ids_to_node_ids,
-            dynamic_style_overrides,
+            dynamic_css_overrides,
         }
     }
+}
+
+pub struct UiState<T: Layout> {
+    pub dom: Dom<T>,
+    pub tag_ids_to_callbacks: BTreeMap<TagId, BTreeMap<On, Callback<T>>>,
+    pub tag_ids_to_default_callbacks: BTreeMap<TagId, BTreeMap<On, DefaultCallbackId>>,
+    pub node_ids_to_tag_ids: BTreeMap<NodeId, TagId>,
+    pub tag_ids_to_node_ids: BTreeMap<TagId, NodeId>,
+    pub tab_index_tags: BTreeMap<TagId, (NodeId, TabIndex)>,
+    pub draggable_tags: BTreeMap<TagId, NodeId>,
+    /// The style properties that should be overridden for this frame, cloned from the `Css`
+    pub dynamic_css_overrides: BTreeMap<NodeId, HashMap<String, CssProperty>>,
 }
 
 /// OpenGL texture, use `ReadOnlyWindow::create_texture` to create a texture
