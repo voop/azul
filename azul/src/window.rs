@@ -554,12 +554,12 @@ pub struct Window<T: Layout> {
     pub(crate) scroll_states: ScrollStates,
     // The background thread that is running for this window.
     // pub(crate) background_thread: Option<JoinHandle<()>>,
-    /// The style applied to the current window
-    pub(crate) style: Css,
-    /// An optional style hot-reloader for the current window, only available with debug_assertions
-    /// enabled
+    /// The CSS applied to the current window
+    pub(crate) css: Css,
+    /// An optional CSS hot-reloader for the current window,
+    /// only available with debug_assertions enabled
     #[cfg(debug_assertions)]
-    pub(crate) style_loader: Option<Box<dyn HotReloadHandler>>,
+    pub(crate) css_loader: Option<Box<dyn HotReloadHandler>>,
     /// Purely a marker, so that `app.run()` can infer the type of `T: Layout`
     /// of the `WindowCreateOptions`, so that we can write:
     ///
@@ -667,7 +667,7 @@ pub(crate) struct WindowInternal {
 impl<'a, T: Layout> Window<T> {
 
     /// Creates a new window
-    pub fn new(mut options: WindowCreateOptions<T>, style: Css) -> Result<Self, WindowCreateError> {
+    pub fn new(mut options: WindowCreateOptions<T>, css: Css) -> Result<Self, WindowCreateError> {
 
         use self::RendererType::*;
         use webrender::WrShaders;
@@ -857,9 +857,9 @@ impl<'a, T: Layout> Window<T> {
             state: options.state,
             renderer: Some(renderer),
             display: Rc::new(display),
-            style: sort_by_specificity(style),
+            css: sort_by_specificity(css),
             #[cfg(debug_assertions)]
-            style_loader: None,
+            css_loader: None,
             animations: FastHashMap::default(),
             scroll_states: ScrollStates::new(),
             internal: WindowInternal {
@@ -876,12 +876,12 @@ impl<'a, T: Layout> Window<T> {
         Ok(window)
     }
 
-    /// Creates a new window that will automatically load a new style from a given HotReloadHandler.
+    /// Creates a new window that will automatically load a new stylesheet from a given HotReloadHandler.
     /// Only available with debug_assertions enabled.
     #[cfg(debug_assertions)]
-    pub fn new_hot_reload(options: WindowCreateOptions<T>, style_loader: Box<dyn HotReloadHandler>) -> Result<Self, WindowCreateError>  {
+    pub fn new_hot_reload(options: WindowCreateOptions<T>, css_loader: Box<dyn HotReloadHandler>) -> Result<Self, WindowCreateError>  {
         let mut window = Window::new(options, Css::default())?;
-        window.style_loader = Some(style_loader);
+        window.css_loader = Some(css_loader);
         Ok(window)
     }
 

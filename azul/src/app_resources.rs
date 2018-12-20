@@ -40,6 +40,7 @@ pub struct AppResources {
     // to make sure that nothing is going wrong. In the next draw call, we
     // upload the font and replace the FontState with the newly created font key
     pub(crate) font_data: RefCell<FastHashMap<FontId, (Rc<Font<'static>>, Rc<Vec<u8>>, Rc<RefCell<FontState>>)>>,
+    pub(crate) font_id_to_font_key: FastHashMap<FontId, FontKey>,
     // After we've looked up the FontKey in the font_data map, we can then access
     // the font instance key (if there is any). If there is no font instance key,
     // we first need to create one.
@@ -56,6 +57,7 @@ impl Default for AppResources {
             style_ids_to_image_ids: FastHashMap::default(),
             fonts: FastHashMap::default(),
             font_data: RefCell::new(FastHashMap::default()),
+            font_id_to_font_key: FastHashMap::default(),
             images: FastHashMap::default(),
             text_cache: TextCache::default(),
             clipboard: SystemClipboard::new().unwrap(),

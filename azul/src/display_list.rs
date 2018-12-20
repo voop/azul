@@ -3,7 +3,7 @@
 
 use std::{
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     collections::BTreeMap,
 };
 use app_units::{AU_PER_PX, MIN_AU, MAX_AU, Au};
@@ -37,8 +37,8 @@ use {
     ui_description::{UiDescription, StyledNode},
     id_tree::{NodeDataContainer, NodeId, NodeHierarchy},
     dom::{
-        IFrameCallback, NodeData, GlTextureCallback, ScrollTagId, DomHash, new_scroll_tag_id,
-        NodeType::{self, Div, Text, Image, GlTexture, IFrame, Label}
+        Dom, Texture, IFrameCallback, NodeData, GlTextureCallback, ScrollTagId, DomHash, new_scroll_tag_id,
+        NodeType::{self, Div, Text, IFrame, Image, GlTexture, Label}
     },
     text_layout::{TextOverflowPass2, ScrollbarInfo, Words, FontMetrics},
     images::ImageId,
@@ -217,11 +217,13 @@ impl<'a, T: Layout + 'a> DisplayList<'a, T> {
                 app_resources.fonts.remove(&font_key);
             }
             app_resources.font_data.borrow_mut().remove(&resource_key);
+            app_resources.font_id_to_font_key.remove(&resource_key);
         }
 
         // Upload all remaining fonts to the GPU only if the haven't been uploaded yet
         for (resource_key, data) in updated_fonts.into_iter() {
             let key = api.generate_font_key();
+            app_resources.font_id_to_font_key.insert(resource_key.clone(), key);
             resource_updates.push(ResourceUpdate::AddFont(AddFont::Raw(key, data, 0))); // TODO: use the index better?
             let mut borrow_mut = app_resources.font_data.borrow_mut();
             *borrow_mut.get_mut(&resource_key).unwrap().2.borrow_mut() = FontState::Uploaded(key);
@@ -239,7 +241,6 @@ impl<'a, T: Layout + 'a> DisplayList<'a, T> {
     {
         use glium::glutin::dpi::LogicalSize;
 
-        let mut app_data_access = AppDataAccess(app_data);
         let mut resource_updates = Vec::<ResourceUpdate>::new();
         let arena = self.ui_descr.ui_descr_arena.borrow();
         let node_hierarchy = &arena.node_layout;
@@ -248,16 +249,44 @@ impl<'a, T: Layout + 'a> DisplayList<'a, T> {
         // Upload image and font resources
         Self::update_resources(&window.internal.api, app_resources, &mut resource_updates);
 
-        let (laid_out_rectangles, node_depths, word_cache) = do_the_layout(
+        let word_cache = build_word_cache(
+            &node_hierarchy,
+            &node_data,
+            &self.rectangles,
+            app_resources,
+        );
+
+        let (laid_out_rectangles, node_depths) = do_the_layout(
             node_hierarchy,
+            &word_cache,
             node_data,
             &self.rectangles,
-            &mut resource_updates,
-            app_resources,
-            &window.internal.api,
+            &app_resources,
             window.state.size.dimensions,
             LogicalPosition::new(0.0, 0.0)
         );
+
+        let mut iframe_cache = build_iframe_cache(
+                &app_data,
+                &node_hierarchy,
+                &node_data,
+                &laid_out_rectangles,
+                fake_window,
+                &app_resources,
+                &window.css,
+        );
+
+        let mut external_resource = build_resources(
+            &iframe_cache,
+            &window.internal.api,
+            &mut resource_updates,
+            window.internal.epoch,
+            app_resources,
+        );
+
+        // Update all resources used in all iframes = final resources
+        //     iframe_cache: &mut IFrameGlCache<T>,
+        &window.internal.api.update_resources(resource_updates);
 
         let mut scrollable_nodes = get_nodes_that_need_scroll_clip(
             node_hierarchy, &self.rectangles, node_data, &laid_out_rectangles,
@@ -268,23 +297,30 @@ impl<'a, T: Layout + 'a> DisplayList<'a, T> {
         window.scroll_states.remove_unused_scroll_states();
 
         let LogicalSize { width, height } = window.state.size.dimensions;
-        let mut builder = DisplayListBuilder::with_capacity(window.internal.pipeline_id, TypedSize2D::new(width as f32, height as f32), self.rectangles.len());
+        let mut builder = DisplayListBuilder::with_capacity(
+            window.internal.pipeline_id,
+            TypedSize2D::new(width as f32, height as f32),
+            self.rectangles.len()
+        );
 
         let rects_in_rendering_order = determine_rendering_order(node_hierarchy, &self.rectangles, &laid_out_rectangles);
 
+        let mut app_data_access = AppDataAccess(app_data);
         push_rectangles_into_displaylist(
             &laid_out_rectangles,
             window.internal.epoch,
             rects_in_rendering_order,
             &mut scrollable_nodes,
             &mut window.scroll_states,
+            &mut iframe_cache,
+            &mut external_resource,
             &DisplayListParametersRef {
                 pipeline_id: window.internal.pipeline_id,
                 node_hierarchy: node_hierarchy,
                 node_data: node_data,
                 render_api: &window.internal.api,
                 display_rectangle_arena: &self.rectangles,
-                app_style: &window.style,
+                css: &window.css,
                 word_cache: &word_cache,
             },
             &mut DisplayListParametersMut {
@@ -292,12 +328,9 @@ impl<'a, T: Layout + 'a> DisplayList<'a, T> {
                 app_resources,
                 fake_window,
                 builder: &mut builder,
-                resource_updates: &mut resource_updates,
                 pipeline_id: window.internal.pipeline_id,
             },
         );
-
-        &window.internal.api.update_resources(resource_updates);
 
         (builder, scrollable_nodes)
     }
@@ -369,7 +402,6 @@ struct RenderableNodeId {
 struct ContentGroupOrder {
     groups: Vec<ContentGroup>,
 }
-
 
 fn determine_rendering_order<'a>(
     node_hierarchy: &NodeHierarchy,
@@ -482,21 +514,16 @@ fn determine_rendering_order_inner<'a>(
 #[derive(Debug, Clone)]
 pub struct WordCache(BTreeMap<NodeId, (Words, FontMetrics)>);
 
-fn do_the_layout<'a,'b, T: Layout>(
+fn build_word_cache<'a,'b, T: Layout>(
     node_hierarchy: &NodeHierarchy,
     node_data: &NodeDataContainer<NodeData<T>>,
     display_rects: &NodeDataContainer<DisplayRectangle<'a>>,
-    resource_updates: &mut Vec<ResourceUpdate>,
     app_resources: &'b mut AppResources,
-    render_api: &RenderApi,
-    rect_size: LogicalSize,
-    rect_offset: LogicalPosition)
--> (NodeDataContainer<LayoutRect>, Vec<(usize, NodeId)>, WordCache)
-{
-    use text_layout::{split_text_into_words, get_words_cached};
-    use ui_solver::{solve_flex_layout_height, solve_flex_layout_width, get_x_positions, get_y_positions};
+) -> WordCache {
 
-    let word_cache: BTreeMap<NodeId, (Words, FontMetrics)> = node_hierarchy
+    use text_layout::{split_text_into_words, get_words_cached};
+
+    WordCache(node_hierarchy
     .linear_iter()
     .filter_map(|id| {
         let (font, font_metrics, font_id, font_size) = match node_data[id].node_type {
@@ -507,8 +534,7 @@ fn do_the_layout<'a,'b, T: Layout>(
                 let style = &rect.style;
                 let font_id = style.font_family.as_ref()?.fonts.get(0)?.clone();
                 let font_size = style.font_size.unwrap_or(*DEFAULT_FONT_SIZE);
-                let font_size_app_units = Au((font_size.0.to_pixels() as i32) * AU_PER_PX as i32);
-                let font_instance_key = push_font(&font_id, font_size_app_units, resource_updates, app_resources, render_api)?;
+
                 let overflow_behaviour = style.overflow.unwrap_or(LayoutOverflow::default());
                 let font = app_resources.get_font(&font_id)?;
                 let (horz_alignment, vert_alignment) = determine_text_alignment(rect);
@@ -542,7 +568,173 @@ fn do_the_layout<'a,'b, T: Layout>(
             },
             _ => None,
         }
+    }).collect())
+}
+
+struct IFrameGlCache<T: Layout> {
+    /// For all iframes, store the DOM + all fonts used in the iframe
+    iframes: BTreeMap<NodeId, (UiState<T>, UiDescription<T>)>,
+    /// Stores all textures +
+    gl_images: BTreeMap<NodeId, Texture>,
+}
+
+struct ExternalResources {
+    font_keys: BTreeMap<NodeId, FontInstanceKey>,
+    gl_image_keys: BTreeMap<NodeId, (ImageKey, ImageDescriptor)>,
+}
+
+fn build_resources<T: Layout>(
+    iframe_cache: &IFrameGlCache<T>,
+    render_api: &RenderApi,
+    resource_updates: &mut Vec<ResourceUpdate>,
+    epoch: Epoch,
+    app_resources: &mut AppResources,
+) -> ExternalResources {
+
+    // Scan the entire DOM for font keys / font instance keys
+    let mut font_keys_scanned = BTreeMap::new();
+    let mut display_lists = Vec::new();
+    for (node_id, (iframe_state, iframe_descr)) in &iframe_cache.iframes {
+        // Upload all necessary FontInstanceKeys for all available fonts
+        // TODO: Store this display list somewhere - currently generated twice for iframes!
+        let display_list = DisplayList::new_from_ui_description(iframe_descr, iframe_state);
+        scan_dom_for_font_keys(resource_updates, render_api, &mut font_keys_scanned, app_resources, &display_list.rectangles);
+        display_lists.push(display_list);
+    }
+
+    // Map font instance keys back to nodes
+    let font_keys = iframe_cache.iframes
+        .keys().zip(display_lists.iter())
+        .filter_map(|(node_id, display_list)| {
+            get_font_key_size(&display_list.rectangles[*node_id].style)
+            .and_then(|font_id| font_keys_scanned.get(&font_id))
+            .and_then(|(_, font_instance_key)| Some((*node_id, *font_instance_key)))
+        })
+        .collect();
+
+    let gl_image_keys = iframe_cache.gl_images.iter().map(|(node_id, gl_image)| {
+        (*node_id, texture_to_image_key(gl_image, render_api, epoch, resource_updates))
     }).collect();
+
+    ExternalResources {
+        gl_image_keys,
+        font_keys,
+    }
+}
+
+fn get_font_key_size(style: &RectStyle) -> Option<(FontId, Au)> {
+    let font_id = style.font_family.as_ref()?.fonts.get(0)?.clone();
+    let font_size = style.font_size.unwrap_or(*DEFAULT_FONT_SIZE);
+    let font_size_app_units = Au((font_size.0.to_pixels() as i32) * AU_PER_PX as i32);
+    Some((font_id, font_size_app_units))
+}
+
+// Vec<ResourceUpdate> will contain all the font instance keys that have to be added in this frame
+fn scan_dom_for_font_keys<'a>(
+    resource_updates: &mut Vec<ResourceUpdate>,
+    render_api: &RenderApi,
+    existing_font_keys: &mut BTreeMap<(FontId, Au), (FontKey, FontInstanceKey)>,
+    app_resources: &mut AppResources,
+    dom: &NodeDataContainer<DisplayRectangle<'a>>
+) {
+    let new_font_keys = dom.internal.iter()
+    .filter_map(|rect| get_font_key_size(&rect.style))
+    .filter(|font_id| existing_font_keys.get(font_id).is_none())
+    .filter_map(|(font_id, font_size)| {
+        let font_key = app_resources.font_id_to_font_key.get(&font_id)?;
+        let au_map = app_resources.fonts.get_mut(&font_key)?;
+        let font_instance_key = au_map.entry(font_size).or_insert_with(|| {
+            let instance_key = render_api.generate_font_instance_key();
+            let add_font_msg = AddFontInstance {
+                key: instance_key,
+                font_key: *font_key,
+                glyph_size: font_size,
+                options: None,
+                platform_options: None,
+                variations: Vec::new(),
+            };
+            resource_updates.push(ResourceUpdate::AddFontInstance(add_font_msg));
+            instance_key
+        });
+        Some(((font_id, font_size), (*font_key, *font_instance_key)))
+    }).collect::<Vec<_>>();
+
+    existing_font_keys.extend(new_font_keys.into_iter());
+}
+
+/// In order to submit the fonts correctly (as well as to do overflow: on iframes later),
+/// all iframe DOMs have to be rendered before the display list is constructed.
+fn build_iframe_cache<T: Layout>(
+    app_data: &Arc<Mutex<T>>,
+    node_hierarchy: &NodeHierarchy,
+    node_data: &NodeDataContainer<NodeData<T>>,
+    layouted_rects: &NodeDataContainer<LayoutRect>,
+    fake_window: &mut FakeWindow<T>,
+    app_resources: &AppResources,
+    css: &Css,
+) -> IFrameGlCache<T> {
+    // Collect all IFrameCallbacks out of the DOM
+    let all_iframe_callbacks = node_hierarchy.linear_iter().filter_map(|node_id| {
+        match node_data[node_id].node_type {
+            NodeType::IFrame(iframe_cb) => Some((node_id, iframe_cb)),
+            _ => None,
+        }
+    }).collect::<BTreeMap<_, _>>();
+
+    let all_gl_callbacks = node_hierarchy.linear_iter().filter_map(|node_id| {
+        match node_data[node_id].node_type {
+            NodeType::GlTexture(gl_callback) => Some((node_id, gl_callback)),
+            _ => None,
+        }
+    }).collect::<BTreeMap<_, _>>();
+
+    if all_iframe_callbacks.is_empty() && all_gl_callbacks.is_empty() {
+        IFrameGlCache {
+            iframes: BTreeMap::new(),
+            gl_images: BTreeMap::new(),
+        }
+    } else {
+        // Lock app state once for all iframes
+        let app_data_access = app_data.lock().unwrap();
+
+        let iframes = all_iframe_callbacks.into_iter().map(|(node_id, iframe_cb)| {
+            let bounds = HidpiAdjustedBounds::from_bounds(&fake_window, layouted_rects[node_id]);
+            let window_info = WindowInfo {
+                window: fake_window,
+                resources: app_resources,
+            };
+            let new_dom = invoke_iframe(&iframe_cb, &app_data_access, window_info, bounds);
+            let ui_state = UiState::from_dom(new_dom);
+            let ui_description = UiDescription::<T>::from_dom(&ui_state, css);
+
+            (node_id, (ui_state, ui_description))
+        }).collect();
+
+        let gl_images = all_gl_callbacks.into_iter().filter_map(|(node_id, gl_callback)| {
+            let bounds = HidpiAdjustedBounds::from_bounds(&fake_window, layouted_rects[node_id]);
+            let window_info = WindowInfo {
+                window: fake_window,
+                resources: app_resources,
+            };
+            let texture = invoke_gl_texture(&gl_callback, &app_data_access, window_info, bounds)?;
+            Some((node_id, texture))
+        }).collect();
+
+        IFrameGlCache { iframes, gl_images }
+    }
+}
+
+fn do_the_layout<'a,'b, T: Layout>(
+    node_hierarchy: &NodeHierarchy,
+    word_cache: &WordCache,
+    node_data: &NodeDataContainer<NodeData<T>>,
+    display_rects: &NodeDataContainer<DisplayRectangle<'a>>,
+    app_resources: &'b AppResources,
+    rect_size: LogicalSize,
+    rect_offset: LogicalPosition)
+-> (NodeDataContainer<LayoutRect>, Vec<(usize, NodeId)>)
+{
+    use ui_solver::{solve_flex_layout_height, solve_flex_layout_width, get_x_positions, get_y_positions};
 
     let preferred_widths = node_data.transform(|node, _| node.node_type.get_preferred_width(&app_resources.images));
     let solved_widths = solve_flex_layout_width(node_hierarchy, &display_rects, preferred_widths, rect_size.width as f32);
@@ -551,8 +743,8 @@ fn do_the_layout<'a,'b, T: Layout>(
         node.node_type.get_preferred_height_based_on_width(
             TextSizePx(solved_widths.solved_widths[id].total()),
             &app_resources.images,
-            word_cache.get(&id).and_then(|e| Some(&e.0)),
-            word_cache.get(&id).and_then(|e| Some(e.1)),
+            word_cache.0.get(&id).and_then(|e| Some(&e.0)),
+            word_cache.0.get(&id).and_then(|e| Some(e.1)),
         ).and_then(|text_size| Some(text_size.0))
     });
     let solved_heights = solve_flex_layout_height(node_hierarchy, &solved_widths, preferred_heights, rect_size.height as f32);
@@ -567,7 +759,7 @@ fn do_the_layout<'a,'b, T: Layout>(
         )
     });
 
-    (layouted_arena, solved_widths.non_leaf_nodes_sorted_by_depth, WordCache(word_cache))
+    (layouted_arena, solved_widths.non_leaf_nodes_sorted_by_depth)
 }
 
 #[derive(Default, Debug, Clone)]
@@ -682,6 +874,8 @@ fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(
     content_grouped_rectangles: ContentGroupOrder,
     scrollable_nodes: &mut ScrolledNodes,
     scroll_states: &mut ScrollStates,
+    iframe_cache: &mut IFrameGlCache<T>,
+    external_resources: &mut ExternalResources,
     referenced_content: &DisplayListParametersRef<'a,'b,'c,'d,'e, T>,
     referenced_mutable_content: &mut DisplayListParametersMut<'f, T>)
 {
@@ -696,6 +890,8 @@ fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(
         // Push the root of the node
         fn push_rect<'a,'b,'c,'d,'e,'f, T: Layout>(
             item: RenderableNodeId,
+            iframe_cache: &mut IFrameGlCache<T>,
+            external_resources: &mut ExternalResources,
             solved_rects_data: &NodeDataContainer<LayoutRect>,
             epoch: Epoch,
             scrollable_nodes: &mut ScrolledNodes,
@@ -711,7 +907,7 @@ fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(
                 html_node: &html_node.node_type,
             };
 
-            displaylist_handle_rect(solved_rect, scrollable_nodes, rectangle, referenced_content, referenced_mutable_content);
+            displaylist_handle_rect(solved_rect, scrollable_nodes, iframe_cache, external_resources, rectangle, referenced_content, referenced_mutable_content);
 
             if item.clip_children {
                 if let Some(last_child) = referenced_content.node_hierarchy[item.node_id].last_child {
@@ -732,6 +928,8 @@ fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(
         }
 
         push_rect(content_group.root,
+                  iframe_cache,
+                  external_resources,
                   solved_rects,
                   epoch,
                   scrollable_nodes,
@@ -741,6 +939,8 @@ fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(
 
         for item in content_group.node_ids {
             push_rect(item,
+                      iframe_cache,
+                      external_resources,
                       solved_rects,
                       epoch,
                       scrollable_nodes,
@@ -850,6 +1050,8 @@ fn get_clip_region<'a>(bounds: LayoutRect, rect: &DisplayRectangle<'a>) -> Optio
 fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     bounds: LayoutRect,
     scrollable_nodes: &mut ScrolledNodes,
+    iframe_cache: &mut IFrameGlCache<T>,
+    external_resources: &mut ExternalResources,
     rectangle: DisplayListRectParams<'a, T>,
     referenced_content: &DisplayListParametersRef<'b,'c,'d,'e,'f, T>,
     referenced_mutable_content: &mut DisplayListParametersMut<'g, T>)
@@ -858,7 +1060,7 @@ fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     use webrender::api::BorderRadius;
 
     let DisplayListParametersRef {
-        render_api, app_style,
+        render_api, css,
         display_rectangle_arena, word_cache, pipeline_id,
         node_hierarchy, node_data,
     } = referenced_content;
@@ -943,7 +1145,7 @@ fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
         text_info: &TextInfo,
         builder: &mut DisplayListBuilder,
         app_resources: &mut AppResources,
-        resource_updates: &mut Vec<ResourceUpdate>|
+        font_instance_key: FontInstanceKey|
     {
         let words = word_cache.0.get(&rect_idx)?;
 
@@ -973,9 +1175,8 @@ fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
             builder,
             &rect.style,
             app_resources,
-            &render_api,
             &text_bounds,
-            resource_updates,
+            font_instance_key,
             horz_alignment,
             vert_alignment,
             &scrollbar_style,
@@ -989,26 +1190,47 @@ fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     };
 
     // Handle the special content of the node, return if it overflows in the vertical direction
-    let overflow_result = match html_node {
+    let overflow_result: Option<OverflowInfo> = match html_node {
         Div => { None },
-        Label(text) => push_text_wrapper(
-            &TextInfo::Uncached(text.clone()),
-            referenced_mutable_content.builder,
-            referenced_mutable_content.app_resources,
-            referenced_mutable_content.resource_updates),
-        Text(text_id) => push_text_wrapper(
-            &TextInfo::Cached(*text_id),
-            referenced_mutable_content.builder,
-            referenced_mutable_content.app_resources,
-            referenced_mutable_content.resource_updates),
-        Image(image_id) => push_image(
-            &info,
-            referenced_mutable_content.builder,
-            referenced_mutable_content.app_resources,
-            image_id,
-            info.rect.size),
-        GlTexture(callback) => push_opengl_texture(callback, &info, rectangle, referenced_content, referenced_mutable_content),
-        IFrame(callback) => push_iframe(callback, &info, scrollable_nodes, rectangle, referenced_content, referenced_mutable_content),
+        Label(text) => {
+            external_resources.font_keys.remove(&rectangle.rect_idx).and_then(|font_instance_key| {
+                push_text_wrapper(
+                    &TextInfo::Uncached(text.clone()),
+                    referenced_mutable_content.builder,
+                    referenced_mutable_content.app_resources,
+                    font_instance_key
+                )
+            })
+        },
+        Text(text_id) => {
+            external_resources.font_keys.remove(&rectangle.rect_idx).and_then(|font_instance_key| {
+                push_text_wrapper(
+                    &TextInfo::Cached(*text_id),
+                    referenced_mutable_content.builder,
+                    referenced_mutable_content.app_resources,
+                    font_instance_key
+                )
+            })
+        },
+        Image(image_id) => {
+            push_image(
+                &info,
+                referenced_mutable_content.builder,
+                referenced_mutable_content.app_resources,
+                image_id,
+                info.rect.size
+            )
+        },
+        GlTexture(_) => {
+            external_resources.gl_image_keys.remove(&rectangle.rect_idx).and_then(|(image_key, image_descriptor)| {
+                push_opengl_texture(image_key, image_descriptor, &info, referenced_mutable_content)
+            })
+        },
+        IFrame(_) => {
+            iframe_cache.iframes.remove(&rectangle.rect_idx).and_then(|(iframe_state, iframe_descr)| {
+                push_iframe(&iframe_state, &iframe_descr, &info, scrollable_nodes, rectangle, referenced_content, referenced_mutable_content)
+            })
+        },
     };
 
     // Push the inset shadow (if any)
@@ -1038,42 +1260,25 @@ fn displaylist_handle_rect<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     }
 }
 
-fn push_opengl_texture<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
-    (texture_callback, texture_stack_ptr): &(GlTextureCallback<T>, StackCheckedPointer<T>),
-    info: &LayoutPrimitiveInfo,
-    rectangle: DisplayListRectParams<'a, T>,
-    referenced_content: &DisplayListParametersRef<'b,'c,'d,'e,'f, T>,
-    referenced_mutable_content: &mut DisplayListParametersMut<'g, T>,
-) -> Option<OverflowInfo>
-{
+fn texture_to_image_key(
+    texture: &Texture,
+    render_api: &RenderApi,
+    epoch: Epoch,
+    resource_updates: &mut Vec<ResourceUpdate>,
+) -> (ImageKey, ImageDescriptor) {
     use compositor::{ActiveTexture, ACTIVE_GL_TEXTURES};
-    use gleam::gl;
-
-    let bounds = HidpiAdjustedBounds::from_bounds(&referenced_mutable_content.fake_window, info.rect);
-
-    let texture;
-
-    {
-        // Make sure that the app data is locked before invoking the callback
-        let _lock = referenced_mutable_content.app_data.0.lock().unwrap();
-        texture = (texture_callback.0)(&texture_stack_ptr, WindowInfo {
-            window: &mut *referenced_mutable_content.fake_window,
-            resources: &referenced_mutable_content.app_resources,
-        }, bounds);
-
-        // Reset the framebuffer and SRGB color target to 0
-        let gl_context = referenced_mutable_content.fake_window.read_only_window().get_gl_context();
-
-        gl_context.bind_framebuffer(gl::FRAMEBUFFER, 0);
-        gl_context.disable(gl::FRAMEBUFFER_SRGB);
-    }
-
-    let texture = texture?;
 
     let opaque = false;
     let allow_mipmaps = true;
-    let descriptor = ImageDescriptor::new(info.rect.size.width as i32, info.rect.size.height as i32, ImageFormat::BGRA8, opaque, allow_mipmaps);
-    let key = referenced_content.render_api.generate_image_key();
+    let descriptor = ImageDescriptor::new(
+        texture.inner.width() as i32,
+        texture.inner.width() as i32,
+        ImageFormat::BGRA8,
+        opaque,
+        allow_mipmaps
+    );
+
+    let key = render_api.generate_image_key();
     let external_image_id = ExternalImageId(new_opengl_texture_id() as u64);
 
     let data = ImageData::External(ExternalImageData {
@@ -1083,27 +1288,69 @@ fn push_opengl_texture<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     });
 
     ACTIVE_GL_TEXTURES.lock().unwrap()
-        .entry(rectangle.epoch).or_insert_with(|| FastHashMap::default())
+        .entry(epoch).or_insert_with(|| FastHashMap::default())
         .insert(external_image_id, ActiveTexture { texture: texture.clone() });
 
-    referenced_mutable_content.resource_updates.push(ResourceUpdate::AddImage(
+    resource_updates.push(ResourceUpdate::AddImage(
         AddImage { key, descriptor, data, tiling: None }
     ));
 
+    (key, descriptor)
+}
+
+fn push_opengl_texture<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
+    key: ImageKey,
+    descriptor: ImageDescriptor,
+    info: &LayoutPrimitiveInfo,
+    referenced_mutable_content: &mut DisplayListParametersMut<'g, T>,
+) -> Option<OverflowInfo>
+{
     referenced_mutable_content.builder.push_image(
         &info,
-        LayoutSize::new(texture.inner.width() as f32, texture.inner.height() as f32),
+        LayoutSize::new(descriptor.size.width as f32,descriptor.size.height as f32),
         LayoutSize::zero(),
         ImageRendering::Auto,
         AlphaType::Alpha,
         key,
-        ColorF::WHITE);
+        ColorF::WHITE
+    );
 
     None
 }
 
-fn push_iframe<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
+fn invoke_gl_texture<T: Layout>(
+    (texture_callback, texture_stack_ptr): &(GlTextureCallback<T>, StackCheckedPointer<T>),
+    _lock: &MutexGuard<T>,
+    window_info: WindowInfo<T>,
+    bounds: HidpiAdjustedBounds,
+) -> Option<Texture> {
+    use gleam::gl;
+
+    let gl_context = window_info.window.read_only_window().get_gl_context();
+
+    // Make sure that the app data is locked before invoking the callback
+    let texture = (texture_callback.0)(&texture_stack_ptr, window_info, bounds);
+
+   // Reset the framebuffer and SRGB color target to 0
+   gl_context.bind_framebuffer(gl::FRAMEBUFFER, 0);
+   gl_context.disable(gl::FRAMEBUFFER_SRGB);
+
+   texture
+}
+
+fn invoke_iframe<T: Layout>(
     (iframe_callback, iframe_pointer): &(IFrameCallback<T>, StackCheckedPointer<T>),
+    _lock: &MutexGuard<T>,
+    window_info: WindowInfo<T>,
+    bounds: HidpiAdjustedBounds,
+) -> Dom<T> {
+    // Make sure that the app data is locked before invoking the callback
+   (iframe_callback.0)(&iframe_pointer, window_info, bounds)
+}
+
+fn push_iframe<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
+    ui_state: &UiState<T>,
+    ui_description: &UiDescription<T>,
     info: &LayoutPrimitiveInfo,
     parent_scrollable_nodes: &mut ScrolledNodes,
     rectangle: DisplayListRectParams<'a, T>,
@@ -1113,23 +1360,6 @@ fn push_iframe<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
 {
     use glium::glutin::dpi::{LogicalPosition, LogicalSize};
 
-    let bounds = HidpiAdjustedBounds::from_bounds(&referenced_mutable_content.fake_window, info.rect);
-
-    let new_dom;
-
-    {
-        // Make sure that the app data is locked before invoking the callback
-        let _lock = referenced_mutable_content.app_data.0.lock().unwrap();
-
-        let window_info = WindowInfo {
-            window: referenced_mutable_content.fake_window,
-            resources: &referenced_mutable_content.app_resources,
-        };
-        new_dom = (iframe_callback.0)(&iframe_pointer, window_info, bounds);
-    }
-
-    let ui_state = UiState::from_dom(new_dom);
-    let ui_description = UiDescription::<T>::from_dom(&ui_state, &referenced_content.app_style);
     let display_list = DisplayList::new_from_ui_description(&ui_description, &ui_state);
 
     let arena = ui_description.ui_descr_arena.borrow();
@@ -1140,13 +1370,19 @@ fn push_iframe<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
     let rect_size = LogicalSize::new(info.rect.size.width as f64, info.rect.size.height as f64);
     let rect_origin = LogicalPosition::new(info.rect.origin.x as f64, info.rect.origin.y as f64);
 
-    let (laid_out_rectangles, node_depths, word_cache) = do_the_layout(
+    let word_cache = build_word_cache(
         &node_hierarchy,
         &node_data,
         &display_list.rectangles,
-        &mut referenced_mutable_content.resource_updates,
         &mut referenced_mutable_content.app_resources,
-        &referenced_content.render_api,
+    );
+
+    let (laid_out_rectangles, node_depths) = do_the_layout(
+        &node_hierarchy,
+        &word_cache,
+        &node_data,
+        &display_list.rectangles,
+        &referenced_mutable_content.app_resources,
         rect_size,
         rect_origin);
 
@@ -1165,15 +1401,17 @@ fn push_iframe<'a,'b,'c,'d,'e,'f,'g, T: Layout>(
         .. *referenced_content
     };
 
-    push_rectangles_into_displaylist(
-        &laid_out_rectangles,
-        rectangle.epoch,
-        rects_in_rendering_order,
-        &mut scrollable_nodes,
-        &mut ScrollStates::new(),
-        &referenced_content,
-        referenced_mutable_content
-    );
+    /*
+        push_rectangles_into_displaylist(
+            &laid_out_rectangles,
+            rectangle.epoch,
+            rects_in_rendering_order,
+            &mut scrollable_nodes,
+            &mut ScrollStates::new(),
+            &referenced_content,
+            referenced_mutable_content
+        );
+    */
 
     parent_scrollable_nodes.overflowing_nodes.extend(scrollable_nodes.overflowing_nodes.into_iter());
     parent_scrollable_nodes.tags_to_node_ids.extend(scrollable_nodes.tags_to_node_ids.into_iter());
@@ -1193,7 +1431,7 @@ struct DisplayListParametersRef<'a, 'b, 'c, 'd, 'e, T: 'a + Layout> {
     pub node_hierarchy: &'e NodeHierarchy,
     pub node_data: &'a NodeDataContainer<NodeData<T>>,
     /// The style that should be applied to the DOM
-    pub app_style: &'b Css,
+    pub css: &'b Css,
     /// Necessary to push
     pub render_api: &'c RenderApi,
     /// Reference to the arena that contains all the styled rectangles
@@ -1216,8 +1454,6 @@ struct DisplayListParametersMut<'a, T: 'a + Layout> {
     /// The app resources, so that a sub-DOM / iframe can register fonts and images
     /// TODO: How to handle cleanup ???
     pub app_resources: &'a mut AppResources,
-    /// If new fonts or other stuff are created, we need to tell WebRender about this
-    pub resource_updates: &'a mut Vec<ResourceUpdate>,
     /// Window access, so that sub-items can register OpenGL textures
     pub fake_window: &'a mut FakeWindow<T>,
     pub pipeline_id: PipelineId,
@@ -1237,6 +1473,18 @@ struct OverflowInfo {
     pub text_overflow: TextOverflowPass2,
 }
 
+/*
+fn get_font_instance_key(
+    render_api: &RenderApi,
+    style: &RectStyle,
+    resource_updates: &mut Vec<ResourceUpdate>,
+    app_resources: &mut AppResources,
+) -> Option<FontInstanceKey> {
+    let (font_id, font_size) = get_font_key_size(style)?;
+    push_font(&font_id, font_size_app_units, resource_updates, app_resources, render_api)
+}
+*/
+
 /// Note: automatically pushes the scrollbars on the parent,
 /// this should be refined later
 #[inline]
@@ -1246,9 +1494,8 @@ fn push_text(
     builder: &mut DisplayListBuilder,
     style: &RectStyle,
     app_resources: &mut AppResources,
-    render_api: &RenderApi,
     bounds: &TypedRect<f32, LayoutPixel>,
-    resource_updates: &mut Vec<ResourceUpdate>,
+    font_instance_key: FontInstanceKey,
     horz_alignment: StyleTextAlignmentHorz,
     vert_alignment: StyleTextAlignmentVert,
     scrollbar_info: &ScrollbarInfo,
@@ -1264,8 +1511,7 @@ fn push_text(
 
     let font_id = style.font_family.as_ref()?.fonts.get(0)?.clone();
     let font_size = style.font_size.unwrap_or(*DEFAULT_FONT_SIZE);
-    let font_size_app_units = Au((font_size.0.to_pixels() as i32) * AU_PER_PX as i32);
-    let font_instance_key = push_font(&font_id, font_size_app_units, resource_updates, app_resources, render_api)?;
+
     let overflow_behaviour = style.overflow.unwrap_or_default();
 
     let text_layout_options = TextLayoutOptions {
@@ -1763,13 +2009,6 @@ fn push_image(
 
     match image_info {
         Uploaded(image_info) => {
-
-            // NOTE: The webrender gamma hack doesn't apply to images,
-            // since webrender has no way of easily coloring images
-            // without using stacking contexts.
-            //
-            // This leads to lighter images, but that's just how things are right now
-
             builder.push_image(
                     &info,
                     size,
@@ -1805,6 +2044,7 @@ fn push_border(
     }
 }
 
+/*
 #[inline]
 fn push_font(
     font_id: &FontId,
@@ -1858,6 +2098,7 @@ fn push_font(
         },
     }
 }
+*/
 
 /// For a given rectangle, determines what text alignment should be used
 fn determine_text_alignment<'a>(rect: &DisplayRectangle<'a>)

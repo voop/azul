@@ -2,6 +2,7 @@ use std::{
     mem,
     fmt,
     io::Read,
+    time::Instant,
     sync::{Arc, Mutex, PoisonError},
 };
 use glium::{
@@ -326,7 +327,7 @@ impl<T: Layout> App<T> {
                     // Style the DOM
                     ui_description_cache[idx] = UiDescription::from_dom(
                         &ui_state_cache[idx],
-                        &window.style,
+                        &window.css,
                     );
 
                     // render the window (webrender will send an Awakened event when the frame is done)
@@ -345,30 +346,7 @@ impl<T: Layout> App<T> {
             }
 
             #[cfg(debug_assertions)] {
-                use style::sort_by_specificity;
-                for (window_idx, window) in self.windows.iter_mut().enumerate() {
-                    // Hot-reload a style if necessary
-                    if let Some(ref mut hot_reloader) = window.style_loader {
-                        if Instant::now() - last_style_reload > hot_reloader.get_reload_interval() {
-                            match hot_reloader.reload_style() {
-                                Ok(style) => {
-                                    window.style = sort_by_specificity(style);
-                                    last_style_reload = Instant::now();
-                                    window.events_loop.create_proxy().wakeup().unwrap_or(());
-                                    awakened_task[window_idx] = true;
-                                },
-                                Err(why) => {
-                                    #[cfg(feature = "logging")] {
-                                        error!("Failed to hot-reload style: {}", why);
-                                    }
-                                    #[cfg(not(feature = "logging"))] {
-                                        println!("Failed to hot-reload style: {}", why);
-                                    }
-                                },
-                            };
-                        }
-                    }
-                }
+                hot_reload_css(&mut self.windows, &mut last_style_reload, &mut awakened_task)
             }
 
             // Close windows if necessary
@@ -552,6 +530,33 @@ impl<T: Layout + Send + 'static> App<T> {
 enum WindowCloseEvent {
     AboutToClose,
     NoCloseEvent,
+}
+
+fn hot_reload_css<T: Layout>(windows: &mut [Window<T>], last_style_reload: &mut Instant, awakened_tasks: &mut [bool]) {
+    use style::sort_by_specificity;
+    for (window_idx, window) in windows.iter_mut().enumerate() {
+        // Hot-reload a style if necessary
+        if let Some(ref mut hot_reloader) = window.css_loader {
+            if Instant::now() - *last_style_reload > hot_reloader.get_reload_interval() {
+                match hot_reloader.reload_style() {
+                    Ok(style) => {
+                        window.css = sort_by_specificity(style);
+                        *last_style_reload = Instant::now();
+                        window.events_loop.create_proxy().wakeup().unwrap_or(());
+                        awakened_tasks[window_idx]  = true;
+                    },
+                    Err(why) => {
+                        #[cfg(feature = "logging")] {
+                            error!("Failed to hot-reload style: {}", why);
+                        }
+                        #[cfg(not(feature = "logging"))] {
+                            println!("Failed to hot-reload style: {}", why);
+                        }
+                    },
+                };
+            }
+        }
+    }
 }
 
 /// Pre-filters any events that are not handled by the framework yet, since it would be wasteful
