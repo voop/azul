@@ -433,6 +433,10 @@ pub fn parse_pixel_value<'a>(input: &'a str)
         "px" => SizeMetric::Px,
         "em" => SizeMetric::Em,
         "pt" => SizeMetric::Pt,
+        "vmin" => SizeMetric::Vmin,
+        "vmax" => SizeMetric::Vmax,
+        "vw" => SizeMetric::Vw,
+        "vh" => SizeMetric::Vh,
         _ => { return Err(PixelParseError::InvalidComponent(&input[(split_pos - 1)..])); }
     };
 

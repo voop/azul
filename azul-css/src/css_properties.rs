@@ -528,6 +528,7 @@ pub struct PixelValue {
 }
 
 impl PixelValue {
+
     #[inline]
     pub fn px(value: f32) -> Self {
         Self::from_metric(SizeMetric::Px, value)
@@ -544,6 +545,26 @@ impl PixelValue {
     }
 
     #[inline]
+    pub fn vw(value: f32) -> Self {
+        Self::from_metric(SizeMetric::Vw, value)
+    }
+
+    #[inline]
+    pub fn vh(value: f32) -> Self {
+        Self::from_metric(SizeMetric::Vh, value)
+    }
+
+    #[inline]
+    pub fn vmin(value: f32) -> Self {
+        Self::from_metric(SizeMetric::Vmin, value)
+    }
+
+    #[inline]
+    pub fn vmax(value: f32) -> Self {
+        Self::from_metric(SizeMetric::Vmax, value)
+    }
+
+    #[inline]
     pub fn from_metric(metric: SizeMetric, value: f32) -> Self {
         Self {
             metric: metric,
@@ -553,11 +574,16 @@ impl PixelValue {
 
     /// Returns the value of the SizeMetric in pixels
     #[inline]
-    pub fn to_pixels(&self) -> f32 {
+    pub fn to_pixels(&self, (window_width, window_height): (f32, f32)) -> f32 {
+        use self::SizeMetric::*;
         match self.metric {
-            SizeMetric::Px => { self.number.get() },
-            SizeMetric::Pt => { (self.number.get()) * PT_TO_PX },
-            SizeMetric::Em => { (self.number.get()) * EM_HEIGHT },
+            Px => self.number.get(),
+            Pt => self.number.get() * PT_TO_PX,
+            Em => self.number.get() * EM_HEIGHT,
+            Vmin => self.number.get() * window_width.min(window_height),
+            Vmax => self.number.get() * window_width.max(window_height),
+            Vw => self.number.get() * window_width,
+            Vh => self.number.get() * window_height,
         }
     }
 }
@@ -608,6 +634,10 @@ pub enum SizeMetric {
     Px,
     Pt,
     Em,
+    Vmin,
+    Vmax,
+    Vw,
+    Vh,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
@@ -768,28 +798,28 @@ impl StyleBorder {
     /// Returns the merged offsets and details for the top, left,
     /// right and bottom styles - necessary, so we can combine `border-top`,
     /// `border-left`, etc. into one border
-    pub fn get_webrender_border(&self, border_radius: Option<StyleBorderRadius>) -> Option<(LayoutSideOffsets, BorderDetails)> {
+    pub fn get_webrender_border(&self, border_radius: Option<StyleBorderRadius>, window_size: (f32, f32)) -> Option<(LayoutSideOffsets, BorderDetails)> {
         match (self.top, self.left, self.bottom, self.right) {
             (None, None, None, None) => None,
             (top, left, bottom, right) => {
 
                 // Widths
-                let border_width_top = top.and_then(|top|  Some(top.border_width.to_pixels())).unwrap_or(0.0);
-                let border_width_bottom = bottom.and_then(|bottom|  Some(bottom.border_width.to_pixels())).unwrap_or(0.0);
-                let border_width_left = left.and_then(|left|  Some(left.border_width.to_pixels())).unwrap_or(0.0);
-                let border_width_right = right.and_then(|right|  Some(right.border_width.to_pixels())).unwrap_or(0.0);
+                let border_width_top    = top.map(|top| top.border_width.to_pixels(window_size)).unwrap_or(0.0);
+                let border_width_bottom = bottom.map(|bottom| bottom.border_width.to_pixels(window_size)).unwrap_or(0.0);
+                let border_width_left   = left.map(|left| left.border_width.to_pixels(window_size)).unwrap_or(0.0);
+                let border_width_right  = right.map(|right| right.border_width.to_pixels(window_size)).unwrap_or(0.0);
 
                 // Color
-                let border_color_top = top.and_then(|top| Some(top.border_color.into())).unwrap_or(DEFAULT_BORDER_COLOR);
-                let border_color_bottom = bottom.and_then(|bottom| Some(bottom.border_color.into())).unwrap_or(DEFAULT_BORDER_COLOR);
-                let border_color_left = left.and_then(|left| Some(left.border_color.into())).unwrap_or(DEFAULT_BORDER_COLOR);
-                let border_color_right = right.and_then(|right| Some(right.border_color.into())).unwrap_or(DEFAULT_BORDER_COLOR);
+                let border_color_top    = top.map(|top| top.border_color.into()).unwrap_or(DEFAULT_BORDER_COLOR);
+                let border_color_bottom = bottom.map(|bottom| bottom.border_color.into()).unwrap_or(DEFAULT_BORDER_COLOR);
+                let border_color_left   = left.map(|left| left.border_color.into()).unwrap_or(DEFAULT_BORDER_COLOR);
+                let border_color_right  = right.map(|right| right.border_color.into()).unwrap_or(DEFAULT_BORDER_COLOR);
 
                 // Styles
-                let border_style_top = top.and_then(|top| Some(top.border_style)).unwrap_or(DEFAULT_BORDER_STYLE);
-                let border_style_bottom = bottom.and_then(|bottom| Some(bottom.border_style)).unwrap_or(DEFAULT_BORDER_STYLE);
-                let border_style_left = left.and_then(|left| Some(left.border_style)).unwrap_or(DEFAULT_BORDER_STYLE);
-                let border_style_right = right.and_then(|right| Some(right.border_style)).unwrap_or(DEFAULT_BORDER_STYLE);
+                let border_style_top    = top.map(|top| top.border_style).unwrap_or(DEFAULT_BORDER_STYLE);
+                let border_style_bottom = bottom.map(|bottom| bottom.border_style).unwrap_or(DEFAULT_BORDER_STYLE);
+                let border_style_left   = left.map(|left| left.border_style).unwrap_or(DEFAULT_BORDER_STYLE);
+                let border_style_right  = right.map(|right| right.border_style).unwrap_or(DEFAULT_BORDER_STYLE);
 
                 let border_widths = LayoutSideOffsets {
                     top: FloatValue::new(border_width_top),
@@ -797,12 +827,13 @@ impl StyleBorder {
                     bottom: FloatValue::new(border_width_bottom),
                     left: FloatValue::new(border_width_left),
                 };
+
                 let border_details = BorderDetails::Normal(NormalBorder {
-                    top: BorderSide { color:  border_color_top.into(), style: border_style_top },
-                    left: BorderSide { color:  border_color_left.into(), style: border_style_left },
-                    right: BorderSide { color:  border_color_right.into(),  style: border_style_right },
-                    bottom: BorderSide { color:  border_color_bottom.into(), style: border_style_bottom },
-                    radius: border_radius.and_then(|r| Some(r.0)),
+                    top:    BorderSide { color:  border_color_top.into(),       style: border_style_top     },
+                    left:   BorderSide { color:  border_color_left.into(),      style: border_style_left    },
+                    right:  BorderSide { color:  border_color_right.into(),     style: border_style_right   },
+                    bottom: BorderSide { color:  border_color_bottom.into(),    style: border_style_bottom  },
+                    radius: border_radius.map(|r| r.0),
                 });
 
                 Some((border_widths, border_details))
@@ -1449,8 +1480,8 @@ pub struct StyleFontSize(pub PixelValue);
 impl_pixel_value!(StyleFontSize);
 
 impl StyleFontSize {
-    pub fn to_pixels(&self) -> f32 {
-        self.0.to_pixels()
+    pub fn to_pixels(&self, window_size: (f32, f32)) -> f32 {
+        self.0.to_pixels(window_size)
     }
 }
 

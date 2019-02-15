@@ -139,14 +139,14 @@ pub(crate) mod webrender_translate {
     use webrender::api::BorderRadius as WrBorderRadius;
 
     #[inline(always)]
-    pub fn wr_translate_border_radius(input: CssBorderRadius) -> WrBorderRadius {
+    pub fn wr_translate_border_radius(input: CssBorderRadius, window_size: (f32, f32)) -> WrBorderRadius {
         use webrender::api::LayoutSize;
         let CssBorderRadius { top_left, top_right, bottom_left, bottom_right } = input;
         WrBorderRadius {
-            top_left: LayoutSize::new(top_left.width.to_pixels(), top_left.height.to_pixels()),
-            top_right: LayoutSize::new(top_right.width.to_pixels(), top_right.height.to_pixels()),
-            bottom_left: LayoutSize::new(bottom_left.width.to_pixels(), bottom_left.height.to_pixels()),
-            bottom_right: LayoutSize::new(bottom_right.width.to_pixels(), bottom_right.height.to_pixels()),
+            top_left: LayoutSize::new(top_left.width.to_pixels(window_size), top_left.height.to_pixels(window_size)),
+            top_right: LayoutSize::new(top_right.width.to_pixels(window_size), top_right.height.to_pixels(window_size)),
+            bottom_left: LayoutSize::new(bottom_left.width.to_pixels(window_size), bottom_left.height.to_pixels(window_size)),
+            bottom_right: LayoutSize::new(bottom_right.width.to_pixels(window_size), bottom_right.height.to_pixels(window_size)),
         }
     }
 
