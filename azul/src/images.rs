@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use webrender::api::{
-    ImageFormat as WebrenderImageFormat,
+    ImageFormat as RawImageFormat,
     ImageData, ImageDescriptor, ImageKey
 };
 #[cfg(feature = "image_loading")]
@@ -11,43 +11,38 @@ use image::{
     ImageError, DynamicImage, GenericImageView,
 };
 
+pub type CssImageId = String;
+
 static IMAGE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static RAW_IMAGE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ImageId {
-    id: usize,
-}
+pub struct ImageId { id: usize }
 
-pub(crate) fn new_image_id() -> ImageId {
-    let unique_id =IMAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    ImageId {
-        id: unique_id,
-    }
-}
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawImageId { id: usize }
 
 impl ImageId {
     pub fn new() -> Self {
-        new_image_id()
+        ImageId { id: IMAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst) }
     }
 }
 
-/*
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum ImageType {
-    Bmp,
-    Gif,
-    Hdr,
-    Ico,
-    Jpeg,
-    Png,
-    Pnm,
-    Tga,
-    Tiff,
-    WebP,
-    /// Try to guess the image format, unknown data
-    GuessImageFormat,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawImageId { id: usize }
+
+impl RawImageId {
+    pub fn new() -> Self {
+        ImageId { id: RAW_IMAGE_ID_COUNTER.fetch_add(1, Ordering::SeqCst) }
+    }
 }
-*/
+
+pub struct RawImage {
+    pub dimensions: (u32, u32),
+    pub pixels: Vec<u8>,
+    pub data_format: RawImageFormat,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ImageInfo {
     pub(crate) key: ImageKey,
@@ -76,36 +71,94 @@ impl ImageState {
     }
 }
 
-/*
-impl ImageType {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExternalImageSource {
+    /// The image is embedded inside the binary file
+    Embedded(&'static [u8]),
+    File(PathBuf),
+}
 
-    #[cfg(feature = "image_loading")]
-    pub(crate) fn into_image_format(&self, data: &[u8]) -> ImageResult<ImageFormat> {
-        use self::ImageType::*;
-        match *self {
-            Bmp => Ok(ImageFormat::BMP),
-            Gif => Ok(ImageFormat::GIF),
-            Hdr => Ok(ImageFormat::HDR),
-            Ico => Ok(ImageFormat::ICO),
-            Jpeg => Ok(ImageFormat::JPEG),
-            Png => Ok(ImageFormat::PNG),
-            Pnm => Ok(ImageFormat::PNM),
-            Tga => Ok(ImageFormat::TGA),
-            Tiff => Ok(ImageFormat::TIFF),
-            WebP => Ok(ImageFormat::WEBP),
-            GuessImageFormat => {
-                image::guess_format(data)
-            }
+impl From<ExternalImageSource> for ImageSource {
+    fn from(source: ExternalImageSource) -> ImageSource {
+        use ExternalImageSource::*;
+        match source {
+            Embedded(e) => ImageSource::Embedded(e),
+            File(path) => ImageSource::File(path),
         }
     }
 }
-*/
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ImageSource {
+    /// The image is embedded inside the binary file
+    Embedded(&'static [u8]),
+    File(PathBuf),
+    /// Image has no source, but was added via the raw bytes
+    RawBytes(RawImageId),
+}
+
+#[derive(Debug)]
+pub enum ImageReloadError {
+    Io(IoError, PathBuf),
+    InvalidRawImageId(RawImageId),
+}
+
+impl Clone for ImageReloadError {
+    fn clone(&self) -> Self {
+        use self::ImageReloadError::*;
+        match self {
+            Io(err, path) => Io(IoError::new(err.kind(), "Io Error"), path.clone()),
+            InvalidRawImageId(id) => InvalidRawImageId(*id),
+        }
+    }
+}
+
+impl fmt::Display for ImageReloadError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::ImageReloadError::*;
+        match self {
+            Io(err, path_buf) => write!(f, "Could not load \"{}\" - IO error: {}", path_buf.as_path().to_string_lossy(), err),
+            InvalidRawImageId(id) => write!(f, "Invalid raw image ID: {:?}", id),
+        }
+    }
+}
+
+impl ImageSource {
+
+    /// Creates an image source using a unique image key
+    pub fn new_raw() -> Self {
+        ImageSource::Raw(RawImageId::new())
+    }
+
+    /// Creates an image source from a `&static [u8]`.
+    pub fn new_from_static(bytes: &'static [u8]) -> Self {
+        ImageSource::Embedded(bytes)
+    }
+
+    /// Creates an image source from a file
+    pub fn new_from_file<I: Into<PathBuf>>(file_path: I) -> Self {
+        ImageSource::File(file_path.into())
+    }
+
+    /// Returns the bytes of the font
+    pub(crate) fn get_bytes(&self, raw_images: &FastHashMap<RawImageId, RawImage>) -> Result<Vec<u8>, ImageReloadError> {
+        use std::fs;
+        use self::ImageSource::*;
+        match self {
+            Embedded(bytes) => Ok(bytes.to_vec()),
+            File(file_path) => fs::read(file_path).map_err(|e| ImageReloadError::Io(e, file_path.clone())),
+            Raw(id) => raw_images.get(id).ok_or(ImageReloadError::InvalidRawImageId(*id)),
+        }
+    }
+}
+
 
 // The next three functions are taken from:
 // https://github.com/christolliday/limn/blob/master/core/src/resources/image.rs
 
+/// Reshuffles the data in a `DynamicImage` into RGBA8 / A8 form.
 #[cfg(feature = "image_loading")]
-pub(crate) fn prepare_image(image_decoded: DynamicImage)
+pub fn prepare_image(image_decoded: DynamicImage)
     -> Result<(ImageData, ImageDescriptor), ImageError>
 {
     let image_dims = image_decoded.dimensions();
@@ -114,7 +167,7 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
     let (format, bytes) = match image_decoded {
         image::ImageLuma8(bytes) => {
             let pixels = bytes.into_raw();
-            (WebrenderImageFormat::R8, pixels)
+            (RawImageFormat::R8, pixels)
         },
         image::ImageLumaA8(bytes) => {
             let mut pixels = Vec::with_capacity(image_dims.0 as usize * image_dims.1 as usize * 4);
@@ -130,7 +183,7 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
             }
             // TODO: necessary for greyscale?
             premultiply(pixels.as_mut_slice());
-            (WebrenderImageFormat::BGRA8, pixels)
+            (RawImageFormat::BGRA8, pixels)
         },
         image::ImageRgba8(mut bytes) => {
             let mut pixels = bytes.into_raw();
@@ -146,7 +199,7 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
                 rgba[3] = a;
             }
             premultiply(pixels.as_mut_slice());
-            (WebrenderImageFormat::BGRA8, pixels)
+            (RawImageFormat::BGRA8, pixels)
         },
         image::ImageRgb8(bytes) => {
             let mut pixels = Vec::with_capacity(image_dims.0 as usize * image_dims.1 as usize * 4);
@@ -158,7 +211,7 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
                     0xff    // a
                 ]);
             }
-            (WebrenderImageFormat::BGRA8, pixels)
+            (RawImageFormat::BGRA8, pixels)
         },
         image::ImageBgr8(bytes) => {
             let mut pixels = Vec::with_capacity(image_dims.0 as usize * image_dims.1 as usize * 4);
@@ -170,13 +223,13 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
                     0xff    // a
                 ]);
             }
-            (WebrenderImageFormat::BGRA8, pixels)
+            (RawImageFormat::BGRA8, pixels)
         },
         image::ImageBgra8(bytes) => {
             // Already in the correct format
             let mut pixels = bytes.into_raw();
             premultiply(pixels.as_mut_slice());
-            (WebrenderImageFormat::BGRA8, pixels)
+            (RawImageFormat::BGRA8, pixels)
         },
     };
 
@@ -187,9 +240,9 @@ pub(crate) fn prepare_image(image_decoded: DynamicImage)
     Ok((data, descriptor))
 }
 
-pub(crate) fn is_image_opaque(format: WebrenderImageFormat, bytes: &[u8]) -> bool {
+pub(crate) fn is_image_opaque(format: RawImageFormat, bytes: &[u8]) -> bool {
     match format {
-        WebrenderImageFormat::BGRA8 => {
+        RawImageFormat::BGRA8 => {
             let mut is_opaque = true;
             for i in 0..(bytes.len() / 4) {
                 if bytes[i * 4 + 3] != 255 {
@@ -199,7 +252,7 @@ pub(crate) fn is_image_opaque(format: WebrenderImageFormat, bytes: &[u8]) -> boo
             }
             is_opaque
         }
-        WebrenderImageFormat::R8 => true,
+        RawImageFormat::R8 => true,
         _ => unreachable!(),
     }
 }

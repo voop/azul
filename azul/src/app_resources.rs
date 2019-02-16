@@ -21,67 +21,8 @@ use {
     text_layout::{split_text_into_words, TextSizePx},
     text_cache::{TextId, TextCache},
     font::{FontState, FontError},
-    images::{ImageId, ImageState},
+    images::{ImageId, ImageState, CssImageId},
 };
-
-pub type CssImageId = String;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ImageSource {
-    /// The image is embedded inside the binary file
-    Embedded(&'static [u8]),
-    File(PathBuf),
-}
-
-#[derive(Debug)]
-pub enum ImageReloadError {
-    Io(IoError, PathBuf),
-}
-
-impl Clone for ImageReloadError {
-    fn clone(&self) -> Self {
-        use self::ImageReloadError::*;
-        match self {
-            Io(err, path) => Io(IoError::new(err.kind(), "Io Error"), path.clone()),
-        }
-    }
-}
-
-impl fmt::Display for ImageReloadError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::ImageReloadError::*;
-        match self {
-            Io(err, path_buf) =>
-            write!(
-                f, "Could not load \"{}\" - IO error: {}",
-                path_buf.as_path().to_string_lossy(), err
-            ),
-        }
-    }
-}
-
-impl ImageSource {
-
-    /// Creates an image source from a `&static [u8]`.
-    pub fn new_from_static(bytes: &'static [u8]) -> Self {
-        ImageSource::Embedded(bytes)
-    }
-
-    /// Creates an image source from a file
-    pub fn new_from_file<I: Into<PathBuf>>(file_path: I) -> Self {
-        ImageSource::File(file_path.into())
-    }
-
-    /// Returns the bytes of the font
-    pub(crate) fn get_bytes(&self) -> Result<Vec<u8>, ImageReloadError> {
-        use std::fs;
-        use self::ImageSource::*;
-        match self {
-            Embedded(bytes) => Ok(bytes.to_vec()),
-            File(file_path) => fs::read(file_path).map_err(|e| ImageReloadError::Io(e, file_path.clone())),
-        }
-    }
-}
 
 /// Stores the resources for the application, souch as fonts, images and cached
 /// texts, also clipboard strings
@@ -89,10 +30,20 @@ impl ImageSource {
 /// Images and fonts can be references across window contexts (not yet tested,
 /// but should work).
 pub struct AppResources {
+    /// Which images were displayed in the last frame? Used for garbage-collecting images
+    /// and unloading them from memory if they aren't used anymore.
+    pub(crate) last_frame_used_images: FastHashSet<ImageId>,
+    /// Which fonts were used on the last frame and which sizes? Used to garbage-collect
+    /// fonts and font instances if they aren't used anymore.
+    pub(crate) last_frame_used_fonts: FastHashSet<(FontId, PixelValue)>,
     /// When looking up images, there are two sources: Either the indirect way via using a
     /// CssImageId (which is a String) or a direct ImageId. The indirect way requires one
     /// extra lookup (to map from the stringified ID to the actual image ID).
     pub(crate) css_ids_to_image_ids: FastHashMap<CssImageId, ImageId>,
+    /// Stores the Image ID -> Image source, so that images can be reloaded if necessary
+    pub(crate) image_ids_to_image_source: FastHashMap<ImageId, ImageSource>,
+    /// Stores all data that has been added via the `.add_raw_image`
+    pub(crate) raw_image_data: FastHashMap<RawImageId, RawImage>,
     /// The actual image cache, does NOT store the image data, only stores it temporarily
     /// while it is being uploaded to the GPU via webrender.
     pub(crate) images: FastHashMap<ImageId, ImageState>,
@@ -115,10 +66,13 @@ pub struct AppResources {
 impl Default for AppResources {
     fn default() -> Self {
         Self {
+            last_frame_used_images: FastHashSet::default(),
+            last_frame_used_fonts: FastHashSet::default(),
             css_ids_to_image_ids: FastHashMap::default(),
+            image_ids_to_image_source: FastHashMap::default()
+            images: FastHashMap::default(),
             fonts: FastHashMap::default(),
             font_data: RefCell::new(FastHashMap::default()),
-            images: FastHashMap::default(),
             text_cache: TextCache::default(),
             clipboard: SystemClipboard::new().unwrap(),
         }
@@ -149,13 +103,12 @@ impl AppResources {
 
     // -- ImageId cache
 
-
     #[cfg(feature = "image_loading")]
-    pub fn add_image<I: Into<Vec<u8>>>(&mut self, id: ImageId, data: I) -> Result<(), ImageError> {
-        match self.images.entry(id) {
+    pub fn add_image(&mut self, image_source: ExternalImageSource) -> Result<ImageId, ImageError> {
+        match self.image_id_to_image_source.entry(image_id) {
             Occupied(_) => Ok(()),
             Vacant(v) => {
-                v.insert(decode_image_data(data)?);
+                v.insert(image_source.into());
                 Ok(())
             },
         }
@@ -167,10 +120,13 @@ impl AppResources {
     ///
     /// - Some(()) if the image was inserted correctly
     /// - `None` if the ImageId already exists (you have to delete the image first using `.delete_image()`)
-    pub fn add_image_raw(&mut self, image_id: ImageId, pixels: Vec<u8>, image_dimensions: (u32, u32), data_format: RawImageFormat) -> Option<()> {
+    pub fn add_image_raw(&mut self, raw_image: RawImage) -> Option<ImageId> {
 
         use images; // the module, not the crate!
         use webrender::api::{ImageData, ImageDescriptor};
+
+        let raw_image_id = RawImageId::new();
+        self.raw_image_data.insert(raw_image_id, raw_image);
 
         match self.images.entry(image_id) {
             Occupied(_) => None,
@@ -186,7 +142,7 @@ impl AppResources {
                 );
                 let data = ImageData::new(pixels);
                 v.insert(ImageState::ReadyForUpload((data, descriptor)));
-                Some(())
+                Some(ImageId::Raw(raw_image_id))
             },
         }
     }
@@ -214,7 +170,7 @@ impl AppResources {
         }
     }
 
-    pub fn add_css_image_id<S: Into<String>>(&mut self, css_id: S) -> ImageId {
+    pub fn add_css_image_id<S: Into<CssImageId>>(&mut self, css_id: S) -> ImageId {
         *self.css_ids_to_image_ids.entry(css_id.into()).or_insert_with(|| ImageId::new())
     }
 
@@ -233,6 +189,12 @@ impl AppResources {
 
     pub fn delete_css_image_id<S: AsRef<str>>(&mut self, css_id: S) -> Option<ImageId> {
         self.css_ids_to_image_ids.remove(css_id.as_ref())
+    }
+
+    /// Returns the (non-decoded) image source bytes
+    pub fn get_image_source_bytes(&self, css_id: ImageId) -> Option<Result<Vec<u8>, ImageReloadError> {
+        self.
+        // decode_image_data(data)?
     }
 
     // -- FontId cache
