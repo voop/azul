@@ -165,6 +165,7 @@ pub enum BorderStyle {
     Inset,
     Outset,
 }
+
 #[derive(Debug, Copy, Clone, PartialEq, Ord, PartialOrd, Eq, Hash)]
 pub struct NinePatchBorder {
     // not implemented or parse-able yet, so no fields!
@@ -710,8 +711,8 @@ pub struct LayoutMargin {
 /// Wrapper for the `overflow-{x,y}` + `overflow` property
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct LayoutOverflow {
-    pub horizontal: TextOverflowBehaviour,
-    pub vertical: TextOverflowBehaviour,
+    pub horizontal: OverflowBehaviour,
+    pub vertical: OverflowBehaviour,
 }
 
 impl LayoutOverflow {
@@ -719,8 +720,8 @@ impl LayoutOverflow {
     // "merges" two LayoutOverflow properties
     pub fn merge(a: &mut Option<Self>, b: &Self) {
 
-        fn merge_property(p: &mut TextOverflowBehaviour, other: &TextOverflowBehaviour) {
-            if *other == TextOverflowBehaviour::NotModified {
+        fn merge_property(p: &mut OverflowBehaviour, other: &OverflowBehaviour) {
+            if *other == OverflowBehaviour::NotModified {
                 return;
             }
             *p = *other;
@@ -734,21 +735,18 @@ impl LayoutOverflow {
         }
     }
 
-    pub fn allows_horizontal_overflow(&self) -> bool {
-        self.horizontal.can_overflow()
+    /// Whether the `overflow-x` value says to display a scrollbar -
+    /// `children_overflow_parent` is necessary for `auto` values where the
+    /// scrollbars get rendered only if the children overflow the parent
+    pub fn needs_horizontal_scrollbar(&self, children_overflow_parent: bool) -> bool {
+        self.horizontal.get_or_default().needs_scrollbar(children_overflow_parent)
     }
 
-    pub fn allows_vertical_overflow(&self) -> bool {
-        self.vertical.can_overflow()
-    }
-
-    // If this overflow setting should show the horizontal scrollbar
-    pub fn allows_horizontal_scrollbar(&self) -> bool {
-        self.allows_horizontal_overflow()
-    }
-
-    pub fn allows_vertical_scrollbar(&self) -> bool {
-        self.allows_vertical_overflow()
+    /// Whether the `overflow-y` value says to display a scrollbar -
+    /// `children_overflow_parent` is necessary for `auto` values where the
+    /// scrollbars get rendered only if the children overflow the parent
+    pub fn needs_vertical_scrollbar(&self, children_overflow_parent: bool) -> bool {
+        self.vertical.get_or_default().needs_scrollbar(children_overflow_parent)
     }
 }
 
@@ -1277,62 +1275,75 @@ pub enum LayoutAlignContent {
 /// in order to be able to "merge" `overflow-x` and `overflow-y`
 /// into one property.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum TextOverflowBehaviour {
+pub enum OverflowBehaviour {
     NotModified,
-    Modified(TextOverflowBehaviourInner),
+    Modified(OverflowBehaviourInner),
 }
 
-impl TextOverflowBehaviour {
-    pub fn can_overflow(&self) -> bool {
-        use self::TextOverflowBehaviour::*;
-        use self::TextOverflowBehaviourInner::*;
+impl OverflowBehaviour {
+    /// If the `overflow` is set to a value, returns that value, otherwise returns the default
+    pub fn get_or_default(&self) -> OverflowBehaviourInner {
+        use self::OverflowBehaviour::*;
         match self {
-            Modified(m) => match m {
-                Scroll | Auto => true,
-                Hidden | Visible => false,
-            },
-            // default: allow horizontal overflow
-            NotModified => false,
-        }
-    }
-
-    pub fn clips_children(&self) -> bool {
-        use self::TextOverflowBehaviour::*;
-        use self::TextOverflowBehaviourInner::*;
-        match self {
-            Modified(m) => match m {
-                Scroll | Auto | Hidden => true,
-                Visible => false,
-            },
-            // default: allow horizontal overflow
-            NotModified => false,
+            NotModified => OverflowBehaviourInner::default(),
+            Modified(overflow) => *overflow,
         }
     }
 }
 
-impl Default for TextOverflowBehaviour {
+impl Default for OverflowBehaviour {
     fn default() -> Self {
-        TextOverflowBehaviour::NotModified
+        OverflowBehaviour::NotModified
     }
 }
 
 /// Represents a `overflow-x` or `overflow-y` property, see
-/// [`TextOverflowBehaviour`](./struct.TextOverflowBehaviour.html) - default: `Auto`
+/// [`OverflowBehaviour`](./struct.OverflowBehaviour.html) - default: `Auto`
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum TextOverflowBehaviourInner {
+pub enum OverflowBehaviourInner {
     /// Always shows a scroll bar, overflows on scroll
     Scroll,
-    /// Does not show a scroll bar by default, only when text is overflowing
+    /// Does not show a scroll bar by default, only when content is overflowing
     Auto,
-    /// Never shows a scroll bar, simply clips text
+    /// Never shows a scroll bar, simply clips content
     Hidden,
-    /// Doesn't show a scroll bar, simply overflows the text
+    /// Doesn't show a scroll bar, simply overflows the content
     Visible,
+    /// Same as `Scroll`, but doesn't re-layout the children,
+    /// essentially "overlaying" the scroll bar over the children
+    Overlay,
+    /// **NOTE** Non-standard: Allows to scroll the frame, but doesn't display a scrollbar.
+    NoScrollBar,
 }
 
-impl Default for TextOverflowBehaviourInner {
+impl Default for OverflowBehaviourInner {
     fn default() -> Self {
-        TextOverflowBehaviourInner::Auto
+        OverflowBehaviourInner::Auto
+    }
+}
+
+impl OverflowBehaviourInner {
+
+    /// Whether the `overflow` property needs to display a scrollbar -
+    /// `children_overflow_parent` specifies whether the element is currently
+    /// overflowing the parent, necessary for `overflow:auto`.
+    pub fn needs_scrollbar(&self, children_overflow_parent: bool) -> bool {
+        use self::OverflowBehaviourInner::*;
+        match self {
+            Scroll | Overlay => true,
+            Auto => children_overflow_parent,
+            Visible | Hidden | NoScrollBar => false,
+        }
+    }
+
+    /// Returns whether the `overflow` needs to insert a clip frame for the children
+    /// (true for all except for `overflow:visible`).
+    pub fn clips_children(&self) -> bool {
+        use self::OverflowBehaviourInner::*;
+        match self {
+            Scroll | Auto | Hidden | NoScrollBar | Overlay => true,
+            Visible => false,
+        }
     }
 }
 

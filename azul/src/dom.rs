@@ -296,7 +296,7 @@ impl<T: Layout> NodeType<T> {
     ) -> Option<TextSizePx>
     {
         use self::NodeType::*;
-        use azul_css::{LayoutOverflow, TextOverflowBehaviour, TextOverflowBehaviourInner};
+        use azul_css::{LayoutOverflow, OverflowBehaviour, OverflowBehaviourInner};
 
         match self {
             Image(i) => image_cache.get(i).and_then(|image_state| {
@@ -306,7 +306,7 @@ impl<T: Layout> NodeType<T> {
             Label(_) | Text(_) => {
                 let (words, font) = (words?, font_metrics?);
                 let vertical_info = words.get_vertical_height(&LayoutOverflow {
-                    horizontal: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Scroll),
+                    horizontal: OverflowBehaviour::Modified(OverflowBehaviourInner::Scroll),
                     .. Default::default()
                 }, &font, div_width);
                 Some(vertical_info.vertical_height)

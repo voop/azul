@@ -600,30 +600,39 @@ fn do_the_layout<'a,'b, T: Layout>(
 
 #[derive(Default, Debug, Clone)]
 pub(crate)  struct ScrolledNodes {
+    /// Nodes that need to have a scrollable area
     pub(crate) overflowing_nodes: BTreeMap<NodeId, OverflowingScrollNode>,
+    /// Hit-testing tags that are necessary since the scrollable nodes
+    /// need a tag for hit-testing
     pub(crate) tags_to_node_ids: BTreeMap<ScrollTagId, NodeId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub(crate) struct OverflowingScrollNode {
-    pub(crate) parent_rect: LayoutRect,
-    pub(crate) child_rect: LayoutRect,
-    pub(crate) parent_external_scroll_id: ExternalScrollId,
-    pub(crate) parent_dom_hash: DomHash,
-    pub(crate) scroll_tag_id: ScrollTagId,
+    /// Rect of the node where the children overflow the parent
+    /// (i.e. the layouted rect of the current node).
+    pub container_rect: LayoutRect,
+    /// Scrollable area (extent of the scroll rect)
+    ///
+    /// **Note**: This usually, but not necessarily the extent
+    /// of the children. For example, if the direct children don't
+    /// overflow, but the grandchildren do, then the scroll frame is extended
+    /// to the overflowing grandchildren
+    pub scroll_frame_rect: LayoutRect,
+    /// External scroll id, required to preserve the state of the
+    /// scroll state accross multiple frames.
+    pub external_scroll_id: ExternalScrollId,
+    /// DOM Hash of the
+    pub dom_hash: DomHash,
+    /// In order to scroll the node, there needs to be a hit-testing
+    /// tag so that the hit-testing can fire for scroll-able nodes
+    /// (if the mouse is over the element and the user scrolls)
+    pub scroll_tag_id: ScrollTagId,
+
 }
 
 /// Returns all node IDs where the children overflow the parent, together with the
 /// `(parent_rect, child_rect)` - the child rect is the sum of the children.
-///
-/// TODO: The performance of this function can be theoretically improved:
-///
-/// - Unioning the rectangles is heavier than just looping through the children and
-/// summing up their width / height / padding + margin.
-/// - Scroll nodes only need to be inserted if the parent doesn't have `overflow: hidden`
-/// activated
-/// - Overflow for X and Y needs to be tracked seperately (for overflow-x / overflow-y separation),
-/// so there we'd need to track in which direction the inner_rect is overflowing.
 fn get_nodes_that_need_scroll_clip<'a, T: 'a + Layout>(
     node_hierarchy: &NodeHierarchy,
     display_list_rects: &NodeDataContainer<DisplayRectangle<'a>>,
@@ -636,30 +645,50 @@ fn get_nodes_that_need_scroll_clip<'a, T: 'a + Layout>(
     let mut nodes = BTreeMap::new();
     let mut tags_to_node_ids = BTreeMap::new();
 
+    // In order to correctly identify the scroll of parents, we also need to look
+    // at the children of children recursively.
+    //
+    // It may be that the child doesn't directly overflow its parent, but the
+    // child of a child does, then the parent needs to display scroll bars.
+    //
+    // For an example, see: https://jsbin.com/tikiporoqi/1/edit?html,css,output
+
+    // Contains all nodes where the children directly overflow the parents
+    let all_overflowing_children = parents.iter().filter_map(|(_, parent)| {
+        (*parent, sum_direct_children(parent, node_hierarchy, layouted_rects))
+    }).collect<BTreeMap<NodeId, LayoutRect>>();
+
+    struct NeedsScrollbar {
+        /// Whether the scroll frame needs to display scroll bars at all
+        pub needs_horizontal_scrollbar: bool,
+        pub needs_vertical_scrollbar: bool,
+        /// Whether the scrollbars use `overflow:overlay`
+        pub horizontal_scrollbar_is_overlayed: bool,
+        pub vetical_scrollbar_is_overlayed: bool,
+    }
+
+    // For each node (all nodes!), determine what the scroll frame would be
+    // (if that node would overflow).
+
+    // Contains all nodes (note: not just parents, *all* nodes) that need scrollbars
+    // NOTE: For overflow:none values, this will set all 4 values to false.
+    let all_nodes_that_need_scrollbars:
+
     for (_, parent) in parents {
 
-        let mut children_sum_rect = None;
-
-        for child in parent.children(&node_hierarchy) {
-            let old = children_sum_rect.unwrap_or(LayoutRect::zero());
-            children_sum_rect = Some(old.union(&layouted_rects[child]));
-        }
-
-        let children_sum_rect = match children_sum_rect {
+        let children_bbox = match  {
             None => continue,
             Some(sum) => sum,
-        };
+        }
 
         let parent_rect = &layouted_rects.get(*parent).unwrap();
 
-        if children_sum_rect.contains_rect(parent_rect) {
+        if children_bbox.contains_rect(parent_rect) {
             continue;
         }
 
         let parent_dom_hash = dom_rects[*parent].calculate_node_data_hash();
 
-        // Create an external scroll id. This id is required to preserve its
-        // scroll state accross multiple frames.
         let parent_external_scroll_id  = ExternalScrollId(parent_dom_hash.0, pipeline_id);
 
         // Create a unique scroll tag for hit-testing
@@ -671,7 +700,7 @@ fn get_nodes_that_need_scroll_clip<'a, T: 'a + Layout>(
         tags_to_node_ids.insert(scroll_tag_id, *parent);
         nodes.insert(*parent, OverflowingScrollNode {
             parent_rect: *parent_rect.clone(),
-            child_rect: children_sum_rect,
+            child_rect: children_bbox,
             parent_external_scroll_id,
             parent_dom_hash,
             scroll_tag_id,
@@ -681,6 +710,24 @@ fn get_nodes_that_need_scroll_clip<'a, T: 'a + Layout>(
     ScrolledNodes { overflowing_nodes: nodes, tags_to_node_ids }
 }
 
+/// Calculates the bounding box of all direct children of a given node
+/// or `None` if the node has no children
+fn sum_direct_children(
+    parent: NodeId,
+    node_hierarchy: &NodeHierarchy,
+    layouted_rects: &NodeDataContainer<LayoutRect>,
+) -> Option<LayoutRect> {
+    let mut children_sum_rect = None;
+
+    for child in parent.children(&node_hierarchy) {
+        let old = children_sum_rect.unwrap_or(LayoutRect::zero());
+        children_sum_rect = Some(old.union(&layouted_rects[child]));
+    }
+
+    children_sum_rect
+}
+
+/// Returns false on `overflow:visible`, true otherwise
 fn node_needs_to_clip_children(style: &RectStyle) -> bool {
     let overflow = style.overflow.unwrap_or_default();
     overflow.horizontal.clips_children() ||
@@ -689,27 +736,28 @@ fn node_needs_to_clip_children(style: &RectStyle) -> bool {
 
 #[test]
 fn test_overflow_parsing() {
-    use azul_css::{TextOverflowBehaviour, TextOverflowBehaviourInner};
+    use azul_css::{OverflowBehaviour, OverflowBehaviourInner};
+
     let style1 = RectStyle::default();
-    assert!(!node_needs_to_clip_children(&style1));
+    assert_eq!(node_needs_to_clip_children(&style1), false);
 
     let style2 = RectStyle {
         overflow: Some(LayoutOverflow {
-            horizontal: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Visible),
-            vertical: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Visible),
+            horizontal: OverflowBehaviour::Modified(OverflowBehaviourInner::Visible),
+            vertical: OverflowBehaviour::Modified(OverflowBehaviourInner::Visible),
         }),
         .. Default::default()
     };
-    assert!(!node_needs_to_clip_children(&style2));
+    assert_eq!(node_needs_to_clip_children(&style2), false);
 
     let style3 = RectStyle {
         overflow: Some(LayoutOverflow {
-            horizontal: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Hidden),
-            vertical: TextOverflowBehaviour::Modified(TextOverflowBehaviourInner::Visible),
+            horizontal: OverflowBehaviour::Modified(OverflowBehaviourInner::Hidden),
+            vertical: OverflowBehaviour::Modified(OverflowBehaviourInner::Visible),
         }),
         .. Default::default()
     };
-    assert!(node_needs_to_clip_children(&style3));
+    assert_eq!(node_needs_to_clip_children(&style3), true);
 }
 
 fn push_rectangles_into_displaylist<'a, 'b, 'c, 'd, 'e, 'f, T: Layout>(

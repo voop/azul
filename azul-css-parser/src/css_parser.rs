@@ -3,7 +3,7 @@
 use std::{fmt, num::{ParseIntError, ParseFloatError}};
 use azul_css::{
     CssPropertyType,
-    StyleTextAlignmentHorz, TextOverflowBehaviour, TextOverflowBehaviourInner,
+    StyleTextAlignmentHorz, OverflowBehaviour, OverflowBehaviourInner,
     LayoutAlignItems, LayoutAlignContent, LayoutJustifyContent, Shape,
     LayoutWrap, LayoutDirection, LayoutPosition, CssProperty, LayoutOverflow,
     StyleFontFamily, StyleFontSize, StyleLineHeight, LayoutFlexShrink, LayoutFlexGrow,
@@ -124,22 +124,22 @@ pub fn parse_key_value_pair<'a>(key: CssPropertyType, value: &'a str) -> Result<
         Overflow         => {
             let overflow_both_directions = parse_layout_text_overflow(value)?;
             Ok(LayoutOverflow {
-                horizontal: TextOverflowBehaviour::Modified(overflow_both_directions),
-                vertical: TextOverflowBehaviour::Modified(overflow_both_directions),
+                horizontal: OverflowBehaviour::Modified(overflow_both_directions),
+                vertical: OverflowBehaviour::Modified(overflow_both_directions),
             }.into())
         },
         OverflowX        => {
             let overflow_x = parse_layout_text_overflow(value)?;
             Ok(LayoutOverflow {
-                horizontal: TextOverflowBehaviour::Modified(overflow_x),
-                vertical: TextOverflowBehaviour::default(),
+                horizontal: OverflowBehaviour::Modified(overflow_x),
+                vertical: OverflowBehaviour::default(),
             }.into())
         },
         OverflowY        => {
             let overflow_y = parse_layout_text_overflow(value)?;
             Ok(LayoutOverflow {
-                horizontal: TextOverflowBehaviour::default(),
-                vertical: TextOverflowBehaviour::Modified(overflow_y),
+                horizontal: OverflowBehaviour::default(),
+                vertical: OverflowBehaviour::Modified(overflow_y),
             }.into())
         }
     }
@@ -2012,11 +2012,13 @@ multi_type_parser!(parse_layout_position, LayoutPosition,
                     ["absolute", Absolute],
                     ["relative", Relative]);
 
-multi_type_parser!(parse_layout_text_overflow, TextOverflowBehaviourInner,
+multi_type_parser!(parse_layout_text_overflow, OverflowBehaviourInner,
                     ["auto", Auto],
                     ["scroll", Scroll],
                     ["visible", Visible],
-                    ["hidden", Hidden]);
+                    ["hidden", Hidden],
+                    ["overlay", Overlay]
+                    ["no-scrollbar", NoScrollBar]);
 
 multi_type_parser!(parse_layout_text_align, StyleTextAlignmentHorz,
                     ["center", Center],
